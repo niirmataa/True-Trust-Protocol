@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "falcon_seeded",
+    "quantum_falcon_wallet",
+    "tt_priv_cli",
+]
