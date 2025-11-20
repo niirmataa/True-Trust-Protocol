@@ -27,6 +27,17 @@ pub struct TxOutputStark {
 }
 
 impl TxOutputStark {
+    /// Simplified constructor for CLI
+    pub fn new_confidential(
+        value: u64,
+        recipient: Hash32,
+        recipient_kyber_pk: &crate::kyber_kem::KyberPublicKey,
+    ) -> anyhow::Result<Self> {
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+        Ok(Self::new(value, &blinding, recipient, recipient_kyber_pk))
+    }
+    
     pub fn new(
         value: u64,
         blinding: &[u8; 32],
