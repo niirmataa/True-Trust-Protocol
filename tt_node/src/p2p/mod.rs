@@ -70,7 +70,7 @@ impl P2PNetwork {
             loop {
                 match listener.accept().await {
                     Ok((stream, addr)) => {
-                        let network = self.clone();
+                        let network = Arc::clone(&self);
                         tokio::spawn(async move {
                             if let Err(e) = network.handle_connection(stream, addr).await {
                                 eprintln!("[P2P] Connection error from {}: {}", addr, e);
@@ -88,7 +88,7 @@ impl P2PNetwork {
     }
     
     /// Handle incoming connection
-    async fn handle_connection(&self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
+    async fn handle_connection(self: Arc<Self>, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
         println!("[P2P] New connection from {}", addr);
         
         // Read handshake
@@ -124,9 +124,12 @@ impl P2PNetwork {
                     self.peers.write().await.insert(node_id, peer);
                     
                     // Handle messages in background
-                    let network = self.clone();
+                    let network_tx = self.message_tx.clone();
+                    let network_peers = Arc::clone(&self.peers);
                     let peer_node_id = node_id;
+                    
                     tokio::spawn(async move {
+                        let mut buffer = vec![0u8; 8192];
                         loop {
                             tokio::select! {
                                 // Receive from peer
@@ -137,9 +140,11 @@ impl P2PNetwork {
                                             buffer.truncate(n);
                                             if let Some((data, _)) = message::read_framed_message(&buffer) {
                                                 if let Ok(msg) = P2PMessage::from_bytes(&data) {
-                                                    let _ = network.message_tx.send((peer_node_id, msg));
+                                                    let _ = network_tx.send((peer_node_id, msg));
                                                 }
                                             }
+                                            // Reset buffer for next read
+                                            buffer.resize(8192, 0);
                                         }
                                         Err(_) => break,
                                     }
@@ -155,7 +160,7 @@ impl P2PNetwork {
                         }
                         
                         // Remove peer on disconnect
-                        network.peers.write().await.remove(&peer_node_id);
+                        network_peers.write().await.remove(&peer_node_id);
                         println!("[P2P] Disconnected from node {}", hex::encode(&peer_node_id[..8]));
                     });
                 }
