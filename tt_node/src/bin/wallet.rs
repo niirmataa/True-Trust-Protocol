@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! TT Wallet Binary Entry Point
 
 fn main() -> anyhow::Result<()> {

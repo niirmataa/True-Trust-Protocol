@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Range proof over u64 using Winterfell 0.13 (production-ready)
 //!
 //! **STATUS:** ✅ PRODUCTION (Rust 1.91.1 >= 1.87 required)

@@ -32,7 +32,7 @@
 //! }
 //!
 //! // Generate deterministic keypair
-//! let drbg = Arc::new(MyDrbg::new());
+//! let drbg = Arc::new(MyDrbg {});
 //! let (pk, sk) = keypair_with(drbg.clone()).unwrap();
 //!
 //! // Sign message deterministically
@@ -256,6 +256,7 @@ pub fn sign_with(
 /// use falcon_seeded::verify;
 ///
 /// let pk = [0u8; 897]; // Public key
+/// let signature = vec![0u8; 690]; // Example signature buffer
 /// let valid = verify(&pk, b"message", &signature);
 /// ```
 pub fn verify(pk: &[u8; PK_LEN], msg: &[u8], sig: &[u8]) -> bool {
@@ -308,7 +309,7 @@ mod tests {
         let drbg = Arc::new(TestDrbg::new());
         let result = keypair_with(drbg);
         assert!(result.is_ok(), "Keypair generation should succeed");
-        
+
         let (pk, sk) = result.unwrap();
         assert_eq!(pk.len(), PK_LEN);
         assert_eq!(sk.len(), SK_LEN);
@@ -325,7 +326,10 @@ mod tests {
         let sig = sign_with(drbg_sign, &sk, msg).unwrap();
 
         assert!(verify(&pk, msg, &sig), "Signature should verify");
-        assert!(!verify(&pk, b"wrong message", &sig), "Wrong message should fail");
+        assert!(
+            !verify(&pk, b"wrong message", &sig),
+            "Wrong message should fail"
+        );
     }
 
     #[test]
@@ -337,7 +341,15 @@ mod tests {
         let drbg2 = Arc::new(TestDrbg::new());
         let (pk2, sk2) = keypair_with(drbg2).unwrap();
 
-        assert_eq!(&pk1[..], &pk2[..], "Same DRBG should produce same public key");
-        assert_eq!(&sk1[..], &sk2[..], "Same DRBG should produce same secret key");
+        assert_eq!(
+            &pk1[..],
+            &pk2[..],
+            "Same DRBG should produce same public key"
+        );
+        assert_eq!(
+            &sk1[..],
+            &sk2[..],
+            "Same DRBG should produce same secret key"
+        );
     }
 }

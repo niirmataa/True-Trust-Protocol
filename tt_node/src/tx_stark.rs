@@ -5,9 +5,9 @@
 //! **Current:** Uses Goldilocks STARK (our implementation)
 //! **Future:** Migrate to Winterfell STARK when Rust 1.87+ available
 
-use serde::{Serialize, Deserialize};
-use sha3::{Sha3_256, Digest};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 
 use crate::core::Hash32;
 
@@ -21,9 +21,9 @@ const KYBER768_CT_BYTES: usize = 1088;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxOutputStark {
     pub value_commitment: Hash32,
-    pub stark_proof: Vec<u8>,       // STARK proof bytes
+    pub stark_proof: Vec<u8>, // STARK proof bytes
     pub recipient: Hash32,
-    pub encrypted_value: Vec<u8>,   // nonce||AEAD||KyberCT
+    pub encrypted_value: Vec<u8>, // nonce||AEAD||KyberCT
 }
 
 impl TxOutputStark {
@@ -37,7 +37,7 @@ impl TxOutputStark {
         rand::thread_rng().fill_bytes(&mut blinding);
         Ok(Self::new(value, &blinding, recipient, recipient_kyber_pk))
     }
-    
+
     pub fn new(
         value: u64,
         blinding: &[u8; 32],
@@ -59,9 +59,13 @@ impl TxOutputStark {
         // Kyber encapsulation + AEAD
         let (ss, ct) = crate::kyber_kem::kyber_encapsulate(recipient_kyber_pk);
         let ss_bytes = crate::kyber_kem::kyber_ss_to_bytes(&ss);
-        let aes_key = crate::kyber_kem::derive_aes_key_from_shared_secret_bytes(&ss_bytes, b"TX_VALUE_ENC");
+        let aes_key =
+            crate::kyber_kem::derive_aes_key_from_shared_secret_bytes(&ss_bytes, b"TX_VALUE_ENC");
 
-        use chacha20poly1305::{XChaCha20Poly1305, Key, XNonce, aead::{Aead, KeyInit}};
+        use chacha20poly1305::{
+            aead::{Aead, KeyInit},
+            Key, XChaCha20Poly1305, XNonce,
+        };
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&aes_key));
         let mut nonce_bytes = [0u8; 24];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -70,7 +74,9 @@ impl TxOutputStark {
         let mut plaintext = Vec::with_capacity(8 + 32);
         plaintext.extend_from_slice(&value.to_le_bytes());
         plaintext.extend_from_slice(blinding);
-        let ciphertext = cipher.encrypt(&nonce, plaintext.as_ref()).expect("encryption failed");
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext.as_ref())
+            .expect("encryption failed");
 
         let ct_bytes = crate::kyber_kem::kyber_ct_to_bytes(&ct);
         let mut encrypted_value = Vec::with_capacity(24 + ciphertext.len() + ct_bytes.len());
@@ -78,7 +84,12 @@ impl TxOutputStark {
         encrypted_value.extend_from_slice(&ciphertext);
         encrypted_value.extend_from_slice(ct_bytes);
 
-        Self { value_commitment: commitment, stark_proof, recipient, encrypted_value }
+        Self {
+            value_commitment: commitment,
+            stark_proof,
+            recipient,
+            encrypted_value,
+        }
     }
 
     pub fn verify(&self) -> bool {
@@ -89,10 +100,15 @@ impl TxOutputStark {
         }
     }
 
-    pub fn decrypt_value(&self, kyber_sk: &crate::kyber_kem::KyberSecretKey) -> Option<(u64, [u8; 32])> {
+    pub fn decrypt_value(
+        &self,
+        kyber_sk: &crate::kyber_kem::KyberSecretKey,
+    ) -> Option<(u64, [u8; 32])> {
         use pqcrypto_traits::kem::Ciphertext as KemCt;
 
-        if self.encrypted_value.len() < 24 + 16 + KYBER768_CT_BYTES { return None; }
+        if self.encrypted_value.len() < 24 + 16 + KYBER768_CT_BYTES {
+            return None;
+        }
         let nonce_bytes = &self.encrypted_value[0..24];
         let ct_end = self.encrypted_value.len() - KYBER768_CT_BYTES;
         let ciphertext = &self.encrypted_value[24..ct_end];
@@ -102,11 +118,16 @@ impl TxOutputStark {
         let ss = crate::kyber_kem::kyber_decapsulate(&kyber_ct, kyber_sk).ok()?;
         let aes_key = crate::kyber_kem::derive_aes_key_from_shared_secret(&ss, b"TX_VALUE_ENC");
 
-        use chacha20poly1305::{XChaCha20Poly1305, Key, XNonce, aead::{Aead, KeyInit}};
+        use chacha20poly1305::{
+            aead::{Aead, KeyInit},
+            Key, XChaCha20Poly1305, XNonce,
+        };
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&aes_key));
         let nonce = XNonce::from_slice(nonce_bytes);
         let plaintext = cipher.decrypt(nonce, ciphertext).ok()?;
-        if plaintext.len() != 40 { return None; }
+        if plaintext.len() != 40 {
+            return None;
+        }
 
         let mut value_bytes = [0u8; 8];
         value_bytes.copy_from_slice(&plaintext[0..8]);
@@ -125,7 +146,11 @@ impl TxOutputStark {
         h.update(&blinding);
         h.update(&self.recipient);
         let recomputed: Hash32 = h.finalize().into();
-        if recomputed == self.value_commitment { Some(value) } else { None }
+        if recomputed == self.value_commitment {
+            Some(value)
+        } else {
+            None
+        }
     }
 }
 
@@ -157,12 +182,16 @@ impl TransactionStark {
     pub fn verify_all_proofs(&self) -> (u32, u32) {
         let mut valid = 0u32;
         for o in &self.outputs {
-            if o.verify() { valid += 1; }
+            if o.verify() {
+                valid += 1;
+            }
         }
         (valid, self.outputs.len() as u32)
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> { bincode::serialize(self).expect("tx serialize") }
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("tx serialize")
+    }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         bincode::deserialize(bytes).map_err(|e| format!("TX deserialization failed: {}", e))
@@ -179,21 +208,16 @@ mod tests {
         let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
         let mut blinding = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut blinding);
-        
-        let output = TxOutputStark::new(
-            100_000,
-            &blinding,
-            [1u8; 32],
-            &kyber_pk,
-        );
-        
+
+        let output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+
         // STARK proof should be generated
         assert!(!output.stark_proof.is_empty());
-        
+
         // Should verify
         assert!(output.verify());
     }
-    
+
     #[test]
     fn test_transaction_stark() {
         let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
@@ -201,10 +225,10 @@ mod tests {
         let mut b2 = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut b1);
         rand::thread_rng().fill_bytes(&mut b2);
-        
+
         let o1 = TxOutputStark::new(123, &b1, [1u8; 32], &kyber_pk);
         let o2 = TxOutputStark::new(456, &b2, [2u8; 32], &kyber_pk);
-        
+
         let tx = TransactionStark {
             inputs: vec![],
             outputs: vec![o1, o2],
@@ -212,7 +236,7 @@ mod tests {
             nonce: 1,
             timestamp: 1234567890,
         };
-        
+
         // All proofs should verify
         let (valid, total) = tx.verify_all_proofs();
         assert_eq!(valid, total);

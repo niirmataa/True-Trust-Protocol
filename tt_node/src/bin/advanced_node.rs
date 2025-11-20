@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Advanced Node CLI - Using tx_stark.rs with STARK proofs and Kyber encryption
 //!
 //! This version relies **exclusively** on encrypted wallets created by `tt_wallet`.

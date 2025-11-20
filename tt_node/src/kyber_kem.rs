@@ -1,5 +1,6 @@
+#![forbid(unsafe_code)]
 //! Kyber-768 Post-Quantum Key Encapsulation Mechanism
-//! 
+//!
 //! For secure peer-to-peer channel establishment in the blockchain network.
 //!
 //! # Security Model
@@ -8,30 +9,31 @@
 //! - **Forward secrecy**: Each session uses fresh shared secret
 //!
 //! # Example
-//! ```no_run
-//! use tt_priv_cli::kyber_kem::*;
-//! 
-//! // Recipient generates keypair
-//! let (recipient_pk, recipient_sk) = kyber_keypair();
-//! 
-//! // Sender encapsulates to get shared secret + ciphertext
-//! let (sender_ss, ciphertext) = kyber_encapsulate(&recipient_pk);
-//! 
-//! // Recipient decapsulates to recover shared secret
-//! let recipient_ss = kyber_decapsulate(&ciphertext, &recipient_sk).unwrap();
-//! 
-//! assert_eq!(sender_ss.as_bytes(), recipient_ss.as_bytes());
+//! ```rust
+//! use pqcrypto_traits::kem::SharedSecret;
+//! use tt_node::kyber_kem::{kyber_decapsulate, kyber_encapsulate, kyber_keypair};
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Recipient generates keypair
+//!     let (recipient_pk, recipient_sk) = kyber_keypair();
+//!
+//!     // Sender encapsulates to get shared secret + ciphertext
+//!     let (sender_ss, ciphertext) = kyber_encapsulate(&recipient_pk);
+//!
+//!     // Recipient decapsulates to recover shared secret
+//!     let recipient_ss = kyber_decapsulate(&ciphertext, &recipient_sk)?;
+//!
+//!     assert_eq!(sender_ss.as_bytes(), recipient_ss.as_bytes());
+//!
+//!     Ok(())
+//! }
 //! ```
-
-#![forbid(unsafe_code)]
 
 use anyhow::{anyhow, Result};
 use pqcrypto_kyber::kyber768;
 use pqcrypto_traits::kem::{
-    PublicKey as KemPublicKey,
-    SecretKey as KemSecretKey,
+    Ciphertext as KemCiphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey,
     SharedSecret as KemSharedSecret,
-    Ciphertext as KemCiphertext,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -59,7 +61,7 @@ pub type KyberCiphertext = kyber768::Ciphertext;
  * ========================================================================== */
 
 /// Generate new Kyber-768 keypair
-/// 
+///
 /// # Returns
 /// (public_key, secret_key)
 #[inline]
@@ -69,14 +71,12 @@ pub fn kyber_keypair() -> (KyberPublicKey, KyberSecretKey) {
 
 /// Import public key from bytes
 pub fn kyber_pk_from_bytes(bytes: &[u8]) -> Result<KyberPublicKey> {
-    KyberPublicKey::from_bytes(bytes)
-        .map_err(|_| anyhow!("Invalid Kyber public key bytes"))
+    KyberPublicKey::from_bytes(bytes).map_err(|_| anyhow!("Invalid Kyber public key bytes"))
 }
 
 /// Import secret key from bytes
 pub fn kyber_sk_from_bytes(bytes: &[u8]) -> Result<KyberSecretKey> {
-    KyberSecretKey::from_bytes(bytes)
-        .map_err(|_| anyhow!("Invalid Kyber secret key bytes"))
+    KyberSecretKey::from_bytes(bytes).map_err(|_| anyhow!("Invalid Kyber secret key bytes"))
 }
 
 /// Export public key to bytes (1184 bytes)
@@ -96,10 +96,10 @@ pub fn kyber_sk_to_bytes(sk: &KyberSecretKey) -> Zeroizing<Vec<u8>> {
  * ========================================================================== */
 
 /// Encapsulate to generate shared secret
-/// 
+///
 /// # Returns
 /// (shared_secret, ciphertext)
-/// 
+///
 /// # Performance
 /// ~200 microseconds on modern CPU
 #[inline]
@@ -108,7 +108,7 @@ pub fn kyber_encapsulate(public_key: &KyberPublicKey) -> (KyberSharedSecret, Kyb
 }
 
 /// Decapsulate ciphertext to recover shared secret
-/// 
+///
 /// # Performance
 /// ~300 microseconds on modern CPU
 pub fn kyber_decapsulate(
@@ -124,8 +124,7 @@ pub fn kyber_decapsulate(
 
 /// Import ciphertext from bytes
 pub fn kyber_ct_from_bytes(bytes: &[u8]) -> Result<KyberCiphertext> {
-    KyberCiphertext::from_bytes(bytes)
-        .map_err(|_| anyhow!("Invalid Kyber ciphertext bytes"))
+    KyberCiphertext::from_bytes(bytes).map_err(|_| anyhow!("Invalid Kyber ciphertext bytes"))
 }
 
 /// Export ciphertext to bytes (1088 bytes)
@@ -163,7 +162,7 @@ pub fn derive_aes_key_from_shared_secret_bytes(ss_bytes: &[u8], context: &[u8]) 
 /// Serializable key exchange result
 #[derive(Clone, Serialize, Deserialize)]
 pub struct KeyExchangeInitiator {
-    pub shared_secret_bytes: Vec<u8>,  // Zeroized
+    pub shared_secret_bytes: Vec<u8>, // Zeroized
     pub ciphertext_bytes: Vec<u8>,
 }
 
@@ -240,26 +239,24 @@ mod tests {
     #[test]
     fn test_encapsulate_decapsulate() {
         let (pk, sk) = kyber_keypair();
-        
+
         let (ss1, ct) = kyber_encapsulate(&pk);
         let ss2 = kyber_decapsulate(&ct, &sk).unwrap();
-        
+
         assert_eq!(ss1.as_bytes(), ss2.as_bytes(), "Shared secrets must match");
     }
 
     #[test]
     fn test_key_exchange_api() {
         let (recipient_pk, recipient_sk) = kyber_keypair();
-        
+
         // Initiator
         let kex_init = initiate_key_exchange(&recipient_pk);
-        
+
         // Recipient
-        let ss_recipient = complete_key_exchange(
-            &kex_init.ciphertext_bytes,
-            &recipient_sk,
-        ).unwrap();
-        
+        let ss_recipient =
+            complete_key_exchange(&kex_init.ciphertext_bytes, &recipient_sk).unwrap();
+
         assert_eq!(
             kex_init.shared_secret_bytes.as_slice(),
             ss_recipient.as_slice(),
@@ -271,26 +268,29 @@ mod tests {
     fn test_derive_symmetric_key() {
         let (pk, _) = kyber_keypair();
         let (ss, _) = kyber_encapsulate(&pk);
-        
+
         let key1 = derive_aes_key_from_shared_secret(&ss, b"CHANNEL_ENC");
         let key2 = derive_aes_key_from_shared_secret(&ss, b"CHANNEL_MAC");
-        
-        assert_ne!(key1, key2, "Different contexts should derive different keys");
+
+        assert_ne!(
+            key1, key2,
+            "Different contexts should derive different keys"
+        );
     }
 
     #[test]
     fn test_ciphertext_import_export() {
         let (pk, sk) = kyber_keypair();
         let (ss1, ct) = kyber_encapsulate(&pk);
-        
+
         // Export
         let ct_bytes = kyber_ct_to_bytes(&ct);
         assert_eq!(ct_bytes.len(), kyber_ct_size());
-        
+
         // Import
         let ct2 = kyber_ct_from_bytes(ct_bytes).unwrap();
         let ss2 = kyber_decapsulate(&ct2, &sk).unwrap();
-        
+
         assert_eq!(ss1.as_bytes(), ss2.as_bytes());
     }
 }

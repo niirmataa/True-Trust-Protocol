@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! KMAC-DRBG: Deterministic Random Bit Generator based on KMAC256/cSHAKE256
 //!
 //! Wersja dla `tt_priv_cli` (crate ze `std`) – bez `no_std`.
@@ -53,16 +54,16 @@ use crate::crypto::kmac::{kmac256_derive_key, kmac256_xof_fill};
 pub struct KmacDrbg {
     /// Internal DRBG key (SENSITIVE - zeroized on drop)
     k: Zeroizing<[u8; 32]>,
-    
+
     /// Block counter (128-bit for ~2^128 blocks before wrap)
     ctr: u128,
-    
+
     /// Personalization string (domain separation, context binding)
     pers: Zeroizing<Vec<u8>>,
-    
+
     /// Blocks generated since last ratchet
     blocks_since_ratchet: u64,
-    
+
     /// Ratchet interval (forward secrecy parameter)
     ratchet_every_blocks: u64,
 }
@@ -130,7 +131,7 @@ impl KmacDrbg {
         // Update state
         self.ctr = self.ctr.wrapping_add(1);
         self.blocks_since_ratchet = self.blocks_since_ratchet.saturating_add(1);
-        
+
         // Automatic ratchet if threshold reached
         if self.blocks_since_ratchet >= self.ratchet_every_blocks {
             self.ratchet();
@@ -160,7 +161,7 @@ impl RngCore for KmacDrbg {
         const BLK: usize = 64;
         let mut buf = [0u8; BLK];
         let mut off = 0;
-        
+
         while off < dest.len() {
             self.gen_block_into(&mut buf);
             let n = min(BLK, dest.len() - off);
@@ -205,7 +206,7 @@ mod tests {
         let mut out_b = [0u8; 128];
         a.fill_bytes(&mut out_a);
         b.fill_bytes(&mut out_b);
-        
+
         assert_eq!(out_a, out_b);
     }
 
@@ -219,7 +220,7 @@ mod tests {
         let mut out_b = [0u8; 64];
         a.fill_bytes(&mut out_a);
         b.fill_bytes(&mut out_b);
-        
+
         assert_ne!(out_a, out_b);
     }
 
@@ -227,14 +228,14 @@ mod tests {
     fn reseed_changes_stream() {
         let seed = [0x42u8; 32];
         let mut drbg = KmacDrbg::new(&seed, b"P");
-        
+
         let mut out1 = [0u8; 64];
         let mut out2 = [0u8; 64];
-        
+
         drbg.fill_bytes(&mut out1);
         drbg.reseed(b"more-entropy");
         drbg.fill_bytes(&mut out2);
-        
+
         assert_ne!(out1, out2);
     }
 
@@ -250,14 +251,14 @@ mod tests {
     #[test]
     fn ratchet_changes_stream() {
         let mut drbg = KmacDrbg::new(&[0x99u8; 32], b"ratchet-test");
-        
+
         let mut out1 = [0u8; 32];
         let mut out2 = [0u8; 32];
-        
+
         drbg.fill_bytes(&mut out1);
         drbg.ratchet();
         drbg.fill_bytes(&mut out2);
-        
+
         assert_ne!(out1, out2);
     }
 
@@ -265,16 +266,16 @@ mod tests {
     fn from_key_deterministic() {
         let key = [0xABu8; 32];
         let pers = b"key-test";
-        
+
         let mut a = KmacDrbg::from_key(key, pers);
         let mut b = KmacDrbg::from_key(key, pers);
-        
+
         let mut out_a = [0u8; 64];
         let mut out_b = [0u8; 64];
-        
+
         a.fill_bytes(&mut out_a);
         b.fill_bytes(&mut out_b);
-        
+
         assert_eq!(out_a, out_b);
     }
 
@@ -282,13 +283,13 @@ mod tests {
     fn set_ratchet_interval() {
         let mut drbg = KmacDrbg::new(&[0x55u8; 32], b"interval-test");
         drbg.set_ratchet_interval(2); // Ratchet every 2 blocks
-        
+
         let mut buf = [0u8; 64];
-        
+
         // First block - no ratchet yet
         drbg.fill_bytes(&mut buf);
         assert_eq!(drbg.blocks_since_ratchet, 1);
-        
+
         // Second block - triggers ratchet
         drbg.fill_bytes(&mut buf);
         assert_eq!(drbg.blocks_since_ratchet, 0);

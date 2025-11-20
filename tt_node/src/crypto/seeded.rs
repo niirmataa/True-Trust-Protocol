@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Deterministic Falcon Operations via KMAC-DRBG
 //!
 //! Ten moduł robi dwie rzeczy:
@@ -121,11 +123,10 @@ pub fn falcon_keypair_deterministic(
     // Create deterministic DRBG
     let drbg = KmacDrbg::new(&seed32, personalization);
     let src = Arc::new(DrbgFill(Mutex::new(drbg)));
-    
+
     // Generate keypair via FFI
-    let (pk, sk) = fs::keypair_with(src)
-        .map_err(|e| format!("Falcon keygen failed: {}", e))?;
-    
+    let (pk, sk) = fs::keypair_with(src).map_err(|e| format!("Falcon keygen failed: {}", e))?;
+
     Ok((pk, sk))
 }
 
@@ -190,16 +191,15 @@ pub fn falcon_sign_deterministic(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // Create deterministic DRBG for coins
     let mut drbg = KmacDrbg::new(&coins_seed, personalization);
-    
+
     // Optional: Ratchet before signing (forward secrecy)
     drbg.ratchet();
-    
+
     let src = Arc::new(DrbgFill(Mutex::new(drbg)));
-    
+
     // Sign via FFI
-    let sig = fs::sign_with(src, sk, msg)
-        .map_err(|e| format!("Falcon signing failed: {}", e))?;
-    
+    let sig = fs::sign_with(src, sk, msg).map_err(|e| format!("Falcon signing failed: {}", e))?;
+
     Ok(sig)
 }
 
@@ -291,7 +291,10 @@ mod tests {
 
         // Different context → different signature
         let sig3 = falcon_sign_deterministic(&sk, msg, coins_seed, b"ctx=B").unwrap();
-        assert_ne!(sig1, sig3, "Different context should produce different signature");
+        assert_ne!(
+            sig1, sig3,
+            "Different context should produce different signature"
+        );
     }
 
     #[test]
@@ -305,7 +308,10 @@ mod tests {
         let sig = falcon_sign_deterministic(&sk, msg, coins_seed, b"v1").unwrap();
 
         assert!(falcon_verify(&pk, msg, &sig), "Signature should verify");
-        assert!(!falcon_verify(&pk, b"wrong msg", &sig), "Wrong message should fail");
+        assert!(
+            !falcon_verify(&pk, b"wrong msg", &sig),
+            "Wrong message should fail"
+        );
     }
 
     #[test]
@@ -313,7 +319,7 @@ mod tests {
         let sk = [0xCDu8; fs::SK_LEN];
         let prf1 = derive_sk_prf(&sk);
         let prf2 = derive_sk_prf(&sk);
-        
+
         assert_eq!(prf1, prf2, "PRF derivation should be deterministic");
         assert_eq!(prf1.len(), 32, "PRF should be 32 bytes");
     }

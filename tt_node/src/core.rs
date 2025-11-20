@@ -10,7 +10,7 @@ pub type Hash32 = [u8; 32];
 pub type NodeId = [u8; 32];
 
 pub fn shake256_bytes(data: &[u8]) -> Hash32 {
-    use tiny_keccak::{Shake, Hasher};
+    use tiny_keccak::{Hasher, Shake};
     let mut sh = Shake::v256();
     sh.update(data);
     let mut out = [0u8; 32];

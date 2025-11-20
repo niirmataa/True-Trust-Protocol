@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! TT Private CLI - Quantum wallet v5 (PQ-only)
 //!
 //! - TYLKO PQC: Falcon512 + ML-KEM (Kyber768)
@@ -12,25 +13,25 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{anyhow, bail, ensure, Result};
+use bincode::Options;
 use clap::{Parser, Subcommand, ValueEnum};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use rpassword::prompt_password;
 use serde::{Deserialize, Serialize};
-use bincode::Options;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use zeroize::{Zeroize, Zeroizing};
 use sha3::{
     digest::{ExtendableOutput, Update, XofReader},
     Shake256,
 };
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use zeroize::{Zeroize, Zeroizing};
 
 // crypto / keys
 use aes_gcm_siv::{Aes256GcmSiv, Nonce as Nonce12Siv};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce as Nonce24};
 use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce as Nonce24};
 
 // PQC
 use pqcrypto_falcon::falcon512;
@@ -39,7 +40,7 @@ use pqcrypto_traits::kem::{PublicKey as PQKemPublicKey, SecretKey as PQKemSecret
 use pqcrypto_traits::sign::{PublicKey as PQPublicKey, SecretKey as PQSecretKey};
 
 // Shamir
-use sharks::{Sharks, Share};
+use sharks::{Share, Sharks};
 
 // Nasze KMAC / KDF
 use crate::crypto::kmac as ck;
@@ -178,7 +179,9 @@ struct KdfHeader {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum KdfKind {
-    Kmac256V1 { salt32: [u8; 32] },
+    Kmac256V1 {
+        salt32: [u8; 32],
+    },
     Argon2idV1 {
         mem_kib: u32,
         time_cost: u32,
@@ -348,8 +351,7 @@ fn pepper_provider(pol: &PepperPolicy) -> Box<dyn PepperProvider> {
 fn derive_kdf_key(password: &str, hdr: &KdfHeader, pepper: &[u8]) -> [u8; 32] {
     match &hdr.kind {
         KdfKind::Kmac256V1 { salt32 } => {
-            let k1 =
-                ck::kmac256_derive_key(password.as_bytes(), b"TT-KDF.v5.kmac.pre", salt32);
+            let k1 = ck::kmac256_derive_key(password.as_bytes(), b"TT-KDF.v5.kmac.pre", salt32);
             ck::kmac256_derive_key(&k1, b"TT-KDF.v5.kmac.post", pepper)
         }
         KdfKind::Argon2idV1 {
@@ -360,13 +362,8 @@ fn derive_kdf_key(password: &str, hdr: &KdfHeader, pepper: &[u8]) -> [u8; 32] {
         } => {
             let params =
                 Params::new(*mem_kib, *time_cost, *lanes, Some(32)).expect("argon2 params");
-            let a2 = Argon2::new_with_secret(
-                pepper,
-                Algorithm::Argon2id,
-                Version::V0x13,
-                params,
-            )
-            .expect("argon2 new_with_secret");
+            let a2 = Argon2::new_with_secret(pepper, Algorithm::Argon2id, Version::V0x13, params)
+                .expect("argon2 new_with_secret");
             let mut out = [0u8; 32];
             a2.hash_password_into(password.as_bytes(), salt32, &mut out)
                 .expect("argon2");
@@ -392,8 +389,7 @@ fn pad(mut v: Vec<u8>, block: usize) -> Vec<u8> {
 
 fn unpad(mut v: Vec<u8>) -> Result<Vec<u8>> {
     ensure!(v.len() >= 8, "bad padded len");
-    let len =
-        u64::from_le_bytes(v[v.len() - 8..].try_into().unwrap()) as usize;
+    let len = u64::from_le_bytes(v[v.len() - 8..].try_into().unwrap()) as usize;
     ensure!(len <= v.len() - 8, "bad pad marker");
     v.truncate(len);
     Ok(v)
@@ -416,8 +412,8 @@ fn encrypt_wallet<T: Serialize>(
     match hdr.aead {
         AeadKind::AesGcmSiv => {
             use aes_gcm_siv::aead::{Aead, KeyInit};
-            let cipher = Aes256GcmSiv::new_from_slice(&*key)
-                .map_err(|_| anyhow!("bad AES-256 key"))?;
+            let cipher =
+                Aes256GcmSiv::new_from_slice(&*key).map_err(|_| anyhow!("bad AES-256 key"))?;
             let nonce = Nonce12Siv::from_slice(&hdr.nonce12);
             Ok(cipher
                 .encrypt(
@@ -431,11 +427,11 @@ fn encrypt_wallet<T: Serialize>(
         }
         AeadKind::XChaCha20 => {
             use chacha20poly1305::aead::{Aead, KeyInit};
-            let n24 =
-                hdr.nonce24_opt
-                    .ok_or_else(|| anyhow!("missing 24B nonce"))?;
-            let cipher = XChaCha20Poly1305::new_from_slice(&*key)
-                .map_err(|_| anyhow!("bad XChaCha key"))?;
+            let n24 = hdr
+                .nonce24_opt
+                .ok_or_else(|| anyhow!("missing 24B nonce"))?;
+            let cipher =
+                XChaCha20Poly1305::new_from_slice(&*key).map_err(|_| anyhow!("bad XChaCha key"))?;
             let nonce = Nonce24::from_slice(&n24);
             Ok(cipher
                 .encrypt(
@@ -463,8 +459,8 @@ pub(crate) fn decrypt_wallet_v3(
     let pt = match hdr.aead {
         AeadKind::AesGcmSiv => {
             use aes_gcm_siv::aead::{Aead, KeyInit};
-            let cipher = Aes256GcmSiv::new_from_slice(&*key)
-                .map_err(|_| anyhow!("bad AES-256 key"))?;
+            let cipher =
+                Aes256GcmSiv::new_from_slice(&*key).map_err(|_| anyhow!("bad AES-256 key"))?;
             let nonce = Nonce12Siv::from_slice(&hdr.nonce12);
             Zeroizing::new(
                 cipher
@@ -480,11 +476,11 @@ pub(crate) fn decrypt_wallet_v3(
         }
         AeadKind::XChaCha20 => {
             use chacha20poly1305::aead::{Aead, KeyInit};
-            let n24 =
-                hdr.nonce24_opt
-                    .ok_or_else(|| anyhow!("missing 24B nonce"))?;
-            let cipher = XChaCha20Poly1305::new_from_slice(&*key)
-                .map_err(|_| anyhow!("bad XChaCha key"))?;
+            let n24 = hdr
+                .nonce24_opt
+                .ok_or_else(|| anyhow!("missing 24B nonce"))?;
+            let cipher =
+                XChaCha20Poly1305::new_from_slice(&*key).map_err(|_| anyhow!("bad XChaCha key"))?;
             let nonce = Nonce24::from_slice(&n24);
             Zeroizing::new(
                 cipher
@@ -637,8 +633,7 @@ fn shard_mac_key(wallet_id: &[u8; 16], salt32: &[u8; 32]) -> [u8; 32] {
 }
 
 fn shard_mask(share: &[u8], pw: &str, salt32: &[u8; 32]) -> Vec<u8> {
-    let mask =
-        ck::kmac256_xof(pw.as_bytes(), b"TT-SHARD.mask", salt32, share.len());
+    let mask = ck::kmac256_xof(pw.as_bytes(), b"TT-SHARD.mask", salt32, share.len());
     share
         .iter()
         .zip(mask.iter())
@@ -756,10 +751,7 @@ fn shards_recover(paths: &[PathBuf]) -> Result<[u8; 32]> {
     let mut rec: Vec<(u8, Vec<u8>)> = Vec::new();
     for (h, ct) in shards {
         let pt = if h.has_pw {
-            let pw = Zeroizing::new(prompt_password(format!(
-                "Password for shard #{}: ",
-                h.idx
-            ))?);
+            let pw = Zeroizing::new(prompt_password(format!("Password for shard #{}: ", h.idx))?);
             shard_mask(&ct, pw.as_str(), &h.salt32)
         } else {
             ct
@@ -902,21 +894,15 @@ fn cmd_wallet_addr(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_wallet_export(
-    path: PathBuf,
-    secret: bool,
-    out: Option<PathBuf>,
-) -> Result<()> {
+fn cmd_wallet_export(path: PathBuf, secret: bool, out: Option<PathBuf>) -> Result<()> {
     let wf = load_wallet_file(&path)?;
     let pw = Zeroizing::new(prompt_password("Password: ")?);
     let secret_payload = decrypt_wallet_v3(&wf.enc, pw.as_str(), &wf.header)?;
     let ks = Keyset::from_payload_v3(&secret_payload)?;
 
     if secret {
-        let outp =
-            out.ok_or_else(|| anyhow!("secret export requires --out <file>"))?;
-        let confirm =
-            Zeroizing::new(prompt_password("Type wallet password again to CONFIRM: ")?);
+        let outp = out.ok_or_else(|| anyhow!("secret export requires --out <file>"))?;
+        let confirm = Zeroizing::new(prompt_password("Type wallet password again to CONFIRM: ")?);
         let _ = decrypt_wallet_v3(&wf.enc, confirm.as_str(), &wf.header)?;
 
         // Minimalny, prosty JSON z master32 + PQ SK
@@ -1032,9 +1018,7 @@ fn create_encrypted_wallet_from_master(
     pepper_flag: PepperFlag,
     pad_block: u16,
 ) -> Result<(WalletHeader, Vec<u8>)> {
-    let pw = Zeroizing::new(
-        prompt_password("Set new wallet password (min 12 chars): ")?,
-    );
+    let pw = Zeroizing::new(prompt_password("Set new wallet password (min 12 chars): ")?);
     ensure!(pw.len() >= 12, "password too short");
     let pw2 = Zeroizing::new(prompt_password("Repeat password: ")?);
     ensure!(pw.as_str() == pw2.as_str(), "password mismatch");
@@ -1207,9 +1191,7 @@ pub fn run_cli() -> Result<()> {
 
         Cmd::WalletAddr { file } => cmd_wallet_addr(file),
 
-        Cmd::WalletExport { file, secret, out } => {
-            cmd_wallet_export(file, secret, out)
-        }
+        Cmd::WalletExport { file, secret, out } => cmd_wallet_export(file, secret, out),
 
         Cmd::WalletRekey {
             file,

@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use crate::core::{Hash32, Block};
 use crate::consensus_weights::Weight;
+use crate::core::{Block, Hash32};
 
 /// Informacja, co się stało przy akceptacji bloku.
 pub struct AcceptResult {
@@ -19,7 +19,7 @@ pub struct ChainStore {
     pub parent: HashMap<Hash32, Hash32>,
     pub height: HashMap<Hash32, u64>,
     pub weight: HashMap<Hash32, Weight>,
-    pub cumw:   HashMap<Hash32, Weight>,
+    pub cumw: HashMap<Hash32, Weight>,
     head: Option<Hash32>,
 }
 
@@ -72,9 +72,7 @@ impl ChainStore {
             let cur_cw = self.cumw.get(&cur).copied().unwrap_or(0);
             let new_cw = self.cumw.get(&id).copied().unwrap_or(0);
 
-            if new_cw > cur_cw
-                || (new_cw == cur_cw
-                    && self.height.get(&id) > self.height.get(&cur))
+            if new_cw > cur_cw || (new_cw == cur_cw && self.height.get(&id) > self.height.get(&cur))
             {
                 self.head = Some(id);
                 is_head = true;

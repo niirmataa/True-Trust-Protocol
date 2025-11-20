@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Core node functionality
 
 use anyhow::{Context, Result};
@@ -12,13 +14,13 @@ use crate::consensus_pro::ConsensusPro;
 pub struct NodeCore {
     /// Chain data store
     pub chain_store: Arc<RwLock<ChainStore>>,
-    
+
     /// Consensus engine
     pub consensus: Arc<RwLock<ConsensusPro>>,
-    
+
     /// Node configuration
     pub config: NodeConfig,
-    
+
     /// Is this a validator node?
     pub is_validator: bool,
 }
@@ -28,10 +30,10 @@ pub struct NodeCore {
 pub struct NodeConfig {
     /// Data directory
     pub data_dir: PathBuf,
-    
+
     /// Chain ID
     pub chain_id: String,
-    
+
     /// Block time in milliseconds
     pub block_time_ms: u64,
 }
@@ -40,26 +42,21 @@ impl NodeCore {
     /// Create a new node instance
     pub fn new(data_dir: PathBuf, is_validator: bool) -> Result<Self> {
         // Create data directory if it doesn't exist
-        std::fs::create_dir_all(&data_dir)
-            .context("Failed to create data directory")?;
-        
+        std::fs::create_dir_all(&data_dir).context("Failed to create data directory")?;
+
         // Initialize chain store
-        let chain_store = Arc::new(RwLock::new(
-            ChainStore::new()
-        ));
-        
+        let chain_store = Arc::new(RwLock::new(ChainStore::new()));
+
         // Initialize consensus
-        let consensus = Arc::new(RwLock::new(
-            ConsensusPro::new_default()
-        ));
-        
+        let consensus = Arc::new(RwLock::new(ConsensusPro::new_default()));
+
         // Default configuration
         let config = NodeConfig {
             data_dir,
             chain_id: "tt-mainnet".to_string(),
             block_time_ms: 6000, // 6 seconds
         };
-        
+
         Ok(Self {
             chain_store,
             consensus,
@@ -67,13 +64,13 @@ impl NodeCore {
             is_validator,
         })
     }
-    
+
     /// Initialize from genesis
     pub async fn init_genesis(&self, genesis_data: &[u8]) -> Result<()> {
         // TODO: Parse and apply genesis state
         Ok(())
     }
-    
+
     /// Start the node
     pub async fn start(&self) -> Result<()> {
         if self.is_validator {
@@ -83,10 +80,10 @@ impl NodeCore {
             println!("Starting as full node...");
             // TODO: Start syncing
         }
-        
+
         Ok(())
     }
-    
+
     /// Stop the node
     pub async fn stop(&self) -> Result<()> {
         println!("Stopping node...");

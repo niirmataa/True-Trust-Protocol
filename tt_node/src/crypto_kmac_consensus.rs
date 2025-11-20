@@ -4,8 +4,8 @@
 //! Supports both SHAKE256 (XOF) and SHA3-512 (higher security) backends
 
 use sha3::{
+    digest::{ExtendableOutput, Update, XofReader},
     Digest, Sha3_512, Shake256,
-    digest::{Update, ExtendableOutput, XofReader},
 };
 
 /// KMAC256 hash using SHA3-512 (32 bytes output, truncated from 64)
@@ -13,7 +13,7 @@ use sha3::{
 /// Uses a fixed key for consensus operations (domain separation via label)
 pub fn kmac256_hash(label: &[u8], inputs: &[&[u8]]) -> [u8; 32] {
     const CONSENSUS_KEY: &[u8] = b"TT-CONSENSUS-KMAC256-v2";
-    
+
     let mut hasher = Sha3_512::new();
     Digest::update(&mut hasher, b"KMAC256-HASH-v2");
     Digest::update(&mut hasher, &(CONSENSUS_KEY.len() as u64).to_le_bytes());
@@ -24,7 +24,7 @@ pub fn kmac256_hash(label: &[u8], inputs: &[&[u8]]) -> [u8; 32] {
         Digest::update(&mut hasher, &(input.len() as u64).to_le_bytes());
         Digest::update(&mut hasher, input);
     }
-    
+
     let result = hasher.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&result[..32]);
@@ -34,7 +34,7 @@ pub fn kmac256_hash(label: &[u8], inputs: &[&[u8]]) -> [u8; 32] {
 /// Legacy KMAC256 hash using SHAKE256 (backward compatibility)
 pub fn kmac256_hash_v1(label: &[u8], inputs: &[&[u8]]) -> [u8; 32] {
     const CONSENSUS_KEY: &[u8] = b"TT-CONSENSUS-KMAC256";
-    
+
     let mut hasher = Shake256::default();
     Update::update(&mut hasher, b"KMAC256-HASH-v1");
     Update::update(&mut hasher, &(CONSENSUS_KEY.len() as u64).to_le_bytes());
@@ -45,7 +45,7 @@ pub fn kmac256_hash_v1(label: &[u8], inputs: &[&[u8]]) -> [u8; 32] {
         Update::update(&mut hasher, &(input.len() as u64).to_le_bytes());
         Update::update(&mut hasher, input);
     }
-    
+
     let mut reader = hasher.finalize_xof();
     let mut out = [0u8; 32];
     XofReader::read(&mut reader, &mut out);
@@ -62,7 +62,7 @@ pub fn kmac256_derive_key(key: &[u8], label: &[u8], context: &[u8]) -> [u8; 32] 
     Update::update(&mut hasher, label);
     Update::update(&mut hasher, &(context.len() as u64).to_le_bytes());
     Update::update(&mut hasher, context);
-    
+
     let mut reader = hasher.finalize_xof();
     let mut out = [0u8; 32];
     XofReader::read(&mut reader, &mut out);
@@ -79,7 +79,7 @@ pub fn kmac256_tag(key: &[u8], label: &[u8], data: &[u8]) -> [u8; 32] {
     Update::update(&mut hasher, label);
     Update::update(&mut hasher, &(data.len() as u64).to_le_bytes());
     Update::update(&mut hasher, data);
-    
+
     let mut reader = hasher.finalize_xof();
     let mut out = [0u8; 32];
     XofReader::read(&mut reader, &mut out);
@@ -96,7 +96,7 @@ pub fn kmac256_xof(key: &[u8], label: &[u8], context: &[u8], out_len: usize) -> 
     Update::update(&mut hasher, label);
     Update::update(&mut hasher, &(context.len() as u64).to_le_bytes());
     Update::update(&mut hasher, context);
-    
+
     let mut reader = hasher.finalize_xof();
     let mut out = vec![0u8; out_len];
     XofReader::read(&mut reader, &mut out);
@@ -125,10 +125,10 @@ mod tests {
     fn test_sha3_512_vs_shake256() {
         let label = b"TEST";
         let input = b"data";
-        
+
         let h_sha3 = kmac256_hash(label, &[input]);
         let h_shake = kmac256_hash_v1(label, &[input]);
-        
+
         assert_ne!(h_sha3, h_shake);
         assert_eq!(h_sha3.len(), 32);
         assert_eq!(h_shake.len(), 32);

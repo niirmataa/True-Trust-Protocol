@@ -15,9 +15,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::node_id::NodeId;
-use crate::rtt_pro::{q_from_f64, q_to_f64, Q, TrustGraph, TrustScore, RTTConfig, ONE_Q};
 use crate::consensus_weights::{compute_final_weight_q, select_leader_deterministic, Weight};
+use crate::node_id::NodeId;
+use crate::rtt_pro::{q_from_f64, q_to_f64, RTTConfig, TrustGraph, TrustScore, ONE_Q, Q};
 
 /// Slot / consensus round identifier.
 pub type Slot = u64;
@@ -104,6 +104,9 @@ impl ConsensusPro {
         };
 
         self.validators.insert(id, state);
+
+        // Normalize stakes immediately so weights reflect the latest totals.
+        self.recompute_all_stake_q();
     }
 
     /// Removes validator (e.g. after unbonding / slashing).
@@ -111,6 +114,8 @@ impl ConsensusPro {
         if let Some(v) = self.validators.remove(id) {
             self.total_stake_raw = self.total_stake_raw.saturating_sub(v.stake_raw);
         }
+
+        self.recompute_all_stake_q();
     }
 
     /// Updates raw stake of validator.
@@ -122,6 +127,8 @@ impl ConsensusPro {
                 .saturating_add(new_stake_raw);
             v.stake_raw = new_stake_raw;
         }
+
+        self.recompute_all_stake_q();
     }
 
     /// Recomputes stake_q for all validators based on total_stake_raw.

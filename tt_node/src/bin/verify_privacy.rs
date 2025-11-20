@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Privacy Verification Tool
 //!
 //! This tool demonstrates and verifies:
@@ -8,16 +10,16 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
-use std::fs;
-use serde_json;
 use hex;
+use serde_json;
+use std::fs;
+use std::path::PathBuf;
 
-use tt_node::tx_stark::{TransactionStark, TxOutputStark};
+use sha3::{Digest, Sha3_256};
 use tt_node::kyber_kem::kyber_keypair;
 use tt_node::node_id::NodeId;
+use tt_node::tx_stark::{TransactionStark, TxOutputStark};
 use tt_node::wallet::api::get_all_keys_from_wallet;
-use sha3::{Sha3_256, Digest};
 
 #[derive(Parser)]
 #[command(name = "verify_privacy")]
@@ -34,19 +36,19 @@ enum Commands {
         #[arg(short, long, default_value = "test_privacy_tx.json")]
         output: PathBuf,
     },
-    
+
     /// Verify STARK proof correctness
     VerifyProofs {
         #[arg(short, long)]
         tx: PathBuf,
     },
-    
+
     /// Analyze transaction encryption (show what's visible/hidden)
     AnalyzeEncryption {
         #[arg(short, long)]
         tx: PathBuf,
     },
-    
+
     /// Test commitment binding (prove value is bound to commitment)
     TestCommitment {
         #[arg(short, long)]
@@ -54,7 +56,7 @@ enum Commands {
         #[arg(short, long)]
         wallet: PathBuf,
     },
-    
+
     /// Full privacy audit
     Audit {
         #[arg(short, long)]
@@ -66,7 +68,7 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    
+
     match cli.command {
         Commands::TestPrivacy { output } => cmd_test_privacy(output),
         Commands::VerifyProofs { tx } => cmd_verify_proofs(tx),
@@ -79,19 +81,16 @@ fn main() -> Result<()> {
 fn cmd_test_privacy(output: PathBuf) -> Result<()> {
     println!("🔒 Privacy Verification Test");
     println!("═══════════════════════════════════════════════\n");
-    
+
     // Create test transaction
     println!("1️⃣  Creating confidential transaction...");
     let (recipient_kyber_pk, recipient_kyber_sk) = kyber_keypair();
     let recipient: NodeId = [0x42; 32];
     let secret_value = 12345u64; // Secret value we want to hide
-    
-    let output_stark = TxOutputStark::new_confidential(
-        secret_value,
-        recipient,
-        &recipient_kyber_pk,
-    )?;
-    
+
+    let output_stark =
+        TxOutputStark::new_confidential(secret_value, recipient, &recipient_kyber_pk)?;
+
     let tx = TransactionStark {
         inputs: vec![],
         outputs: vec![output_stark],
@@ -101,13 +100,13 @@ fn cmd_test_privacy(output: PathBuf) -> Result<()> {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs(),
     };
-    
+
     // Save transaction
     let tx_json = serde_json::to_string_pretty(&tx)?;
     fs::write(&output, tx_json)?;
-    
+
     println!("✅ Transaction created: {}\n", output.display());
-    
+
     // Test 1: Verify STARK proof
     println!("2️⃣  Verifying STARK Proof...");
     let (valid, total) = tx.verify_all_proofs();
@@ -119,42 +118,64 @@ fn cmd_test_privacy(output: PathBuf) -> Result<()> {
         return Err(anyhow::anyhow!("STARK proof verification failed"));
     }
     println!();
-    
+
     // Test 2: Show what's visible in transaction
     println!("3️⃣  Analyzing Transaction Visibility...");
     println!("   📊 Transaction Structure:");
     println!("      TX ID: {}", hex::encode(&tx.id()[..16]));
     println!("      Outputs: {}", tx.outputs.len());
     println!();
-    
+
     for (i, output) in tx.outputs.iter().enumerate() {
         println!("   Output {}:", i + 1);
-        println!("      ✅ Commitment: {}", hex::encode(&output.value_commitment[..16]));
+        println!(
+            "      ✅ Commitment: {}",
+            hex::encode(&output.value_commitment[..16])
+        );
         println!("      ✅ STARK Proof: {} bytes", output.stark_proof.len());
-        println!("      ✅ Recipient (hash): {}", hex::encode(&output.recipient[..16]));
-        println!("      ✅ Encrypted Value: {} bytes", output.encrypted_value.len());
+        println!(
+            "      ✅ Recipient (hash): {}",
+            hex::encode(&output.recipient[..16])
+        );
+        println!(
+            "      ✅ Encrypted Value: {} bytes",
+            output.encrypted_value.len()
+        );
         println!();
-        
+
         // Try to extract value WITHOUT key (should fail)
         println!("   🔍 Attempting to extract value WITHOUT decryption key...");
         let encrypted_bytes = &output.encrypted_value;
         println!("      Encrypted data structure:");
-        println!("         - Nonce (24 bytes): {}", hex::encode(&encrypted_bytes[0..24.min(encrypted_bytes.len())]));
+        println!(
+            "         - Nonce (24 bytes): {}",
+            hex::encode(&encrypted_bytes[0..24.min(encrypted_bytes.len())])
+        );
         if encrypted_bytes.len() > 24 {
             let ct_start = 24;
             let ct_end = encrypted_bytes.len().saturating_sub(1088);
             if ct_end > ct_start {
-                println!("         - AEAD Ciphertext ({} bytes): {}", 
-                    ct_end - ct_start, 
-                    hex::encode(&encrypted_bytes[ct_start..ct_start.min(ct_end) + 16.min(ct_end - ct_start)]));
+                println!(
+                    "         - AEAD Ciphertext ({} bytes): {}",
+                    ct_end - ct_start,
+                    hex::encode(
+                        &encrypted_bytes
+                            [ct_start..ct_start.min(ct_end) + 16.min(ct_end - ct_start)]
+                    )
+                );
             }
             if encrypted_bytes.len() >= 1088 {
-                println!("         - Kyber Ciphertext (1088 bytes): {}", 
-                    hex::encode(&encrypted_bytes[encrypted_bytes.len() - 1088..encrypted_bytes.len() - 1072]));
+                println!(
+                    "         - Kyber Ciphertext (1088 bytes): {}",
+                    hex::encode(
+                        &encrypted_bytes
+                            [encrypted_bytes.len() - 1088..encrypted_bytes.len() - 1072]
+                    )
+                );
             }
         }
         println!();
-        
+
         // Try to guess value from encrypted data (should be impossible)
         println!("   🎲 Attempting to guess value from encrypted data...");
         println!("      ❌ Cannot determine value from ciphertext");
@@ -162,7 +183,7 @@ fn cmd_test_privacy(output: PathBuf) -> Result<()> {
         println!("      ✅ Value is CRYPTographically HIDDEN");
         println!();
     }
-    
+
     // Test 3: Verify decryption works ONLY with correct key
     println!("4️⃣  Testing Decryption (with correct key)...");
     let output = &tx.outputs[0];
@@ -170,8 +191,11 @@ fn cmd_test_privacy(output: PathBuf) -> Result<()> {
         Some(decrypted_value) => {
             println!("   ✅ Decryption SUCCESSFUL!");
             println!("   ✅ Decrypted value: {} TT", decrypted_value);
-            println!("   ✅ Matches original: {} (expected: {})", 
-                decrypted_value == secret_value, secret_value);
+            println!(
+                "   ✅ Matches original: {} (expected: {})",
+                decrypted_value == secret_value,
+                secret_value
+            );
             if decrypted_value == secret_value {
                 println!("   ✅ Commitment binding VERIFIED");
             }
@@ -182,14 +206,16 @@ fn cmd_test_privacy(output: PathBuf) -> Result<()> {
         }
     }
     println!();
-    
+
     // Test 4: Try with wrong key (should fail)
     println!("5️⃣  Testing Decryption (with WRONG key)...");
     let (_wrong_kyber_pk, wrong_kyber_sk) = kyber_keypair();
     match output.decrypt_and_verify(&wrong_kyber_sk) {
         Some(_) => {
             println!("   ❌ SECURITY BREACH: Decryption worked with wrong key!");
-            return Err(anyhow::anyhow!("Security vulnerability: wrong key decrypted"));
+            return Err(anyhow::anyhow!(
+                "Security vulnerability: wrong key decrypted"
+            ));
         }
         None => {
             println!("   ✅ Decryption FAILED with wrong key (as expected)");
@@ -197,7 +223,7 @@ fn cmd_test_privacy(output: PathBuf) -> Result<()> {
         }
     }
     println!();
-    
+
     println!("✅ All privacy tests PASSED!");
     println!();
     println!("📋 Summary:");
@@ -206,26 +232,26 @@ fn cmd_test_privacy(output: PathBuf) -> Result<()> {
     println!("   ✅ Without decryption key, values are HIDDEN");
     println!("   ✅ Commitment binding prevents value tampering");
     println!("   ✅ Only recipient can decrypt the value");
-    
+
     Ok(())
 }
 
 fn cmd_verify_proofs(tx_path: PathBuf) -> Result<()> {
     println!("🔍 Verifying STARK Proofs...");
     println!();
-    
+
     let tx_json = fs::read_to_string(&tx_path)?;
     let tx: TransactionStark = serde_json::from_str(&tx_json)?;
-    
+
     println!("Transaction: {}", hex::encode(&tx.id()[..16]));
     println!("Outputs: {}\n", tx.outputs.len());
-    
+
     let (valid, total) = tx.verify_all_proofs();
-    
+
     println!("STARK Proof Verification:");
     println!("   Valid: {}/{}", valid, total);
     println!();
-    
+
     if valid == total {
         println!("✅ All STARK proofs are CRYPTOGRAPHICALLY VALID");
         println!();
@@ -242,53 +268,62 @@ fn cmd_verify_proofs(tx_path: PathBuf) -> Result<()> {
         println!("   • Possible tampering");
         return Err(anyhow::anyhow!("STARK proof verification failed"));
     }
-    
+
     Ok(())
 }
 
 fn cmd_analyze_encryption(tx_path: PathBuf) -> Result<()> {
     println!("🔐 Analyzing Transaction Encryption...");
     println!("═══════════════════════════════════════════════\n");
-    
+
     let tx_json = fs::read_to_string(&tx_path)?;
     let tx: TransactionStark = serde_json::from_str(&tx_json)?;
-    
+
     println!("Transaction ID: {}\n", hex::encode(&tx.id()[..16]));
-    
+
     for (i, output) in tx.outputs.iter().enumerate() {
         println!("Output {} Analysis:", i + 1);
         println!("─────────────────────────────────────────");
         println!();
-        
+
         // What's visible
         println!("📊 VISIBLE (Public) Information:");
         println!("   • Commitment: {}", hex::encode(&output.value_commitment));
         println!("   • STARK Proof: {} bytes", output.stark_proof.len());
         println!("   • Recipient (hash): {}", hex::encode(&output.recipient));
-        println!("   • Encrypted Value Size: {} bytes", output.encrypted_value.len());
+        println!(
+            "   • Encrypted Value Size: {} bytes",
+            output.encrypted_value.len()
+        );
         println!();
-        
+
         // What's hidden
         println!("🔒 HIDDEN (Encrypted) Information:");
         println!("   • Actual Value: ❌ NOT VISIBLE");
         println!("   • Blinding Factor: ❌ NOT VISIBLE");
         println!("   • Plaintext: ❌ NOT VISIBLE");
         println!();
-        
+
         // Encryption structure
         println!("🔐 Encryption Structure:");
         if output.encrypted_value.len() >= 24 {
             println!("   Format: [Nonce (24B) || AEAD Ciphertext || Kyber CT (1088B)]");
-            println!("   Nonce: {}", hex::encode(&output.encrypted_value[0..24.min(output.encrypted_value.len())]));
-            
+            println!(
+                "   Nonce: {}",
+                hex::encode(&output.encrypted_value[0..24.min(output.encrypted_value.len())])
+            );
+
             if output.encrypted_value.len() > 24 + 1088 {
                 let aead_size = output.encrypted_value.len() - 24 - 1088;
-                println!("   AEAD Ciphertext: {} bytes (XChaCha20-Poly1305)", aead_size);
+                println!(
+                    "   AEAD Ciphertext: {} bytes (XChaCha20-Poly1305)",
+                    aead_size
+                );
                 println!("   Kyber Ciphertext: 1088 bytes (Kyber-768)");
             }
         }
         println!();
-        
+
         // Entropy analysis
         println!("🎲 Entropy Analysis:");
         let encrypted = &output.encrypted_value;
@@ -297,7 +332,10 @@ fn cmd_analyze_encryption(tx_path: PathBuf) -> Result<()> {
             let sample = &encrypted[24..56.min(encrypted.len())];
             let unique_bytes: std::collections::HashSet<u8> = sample.iter().copied().collect();
             let entropy_estimate = (unique_bytes.len() as f64 / 32.0) * 100.0;
-            println!("   Sample entropy: ~{:.1}% (high = good encryption)", entropy_estimate);
+            println!(
+                "   Sample entropy: ~{:.1}% (high = good encryption)",
+                entropy_estimate
+            );
             if entropy_estimate > 80.0 {
                 println!("   ✅ Data appears random (good encryption)");
             } else {
@@ -305,7 +343,7 @@ fn cmd_analyze_encryption(tx_path: PathBuf) -> Result<()> {
             }
         }
         println!();
-        
+
         // Cryptographic properties
         println!("🛡️  Cryptographic Properties:");
         println!("   ✅ Post-Quantum: Kyber-768 (NIST standardized)");
@@ -315,48 +353,48 @@ fn cmd_analyze_encryption(tx_path: PathBuf) -> Result<()> {
         println!("   ✅ Key Derivation: KMAC256 from shared secret");
         println!();
     }
-    
+
     println!("✅ Encryption Analysis Complete");
     println!();
     println!("Conclusion:");
     println!("   • Values are CRYPTographically HIDDEN");
     println!("   • Without recipient's Kyber secret key, decryption is IMPOSSIBLE");
     println!("   • Even with quantum computers, Kyber-768 provides security");
-    
+
     Ok(())
 }
 
 fn cmd_test_commitment(tx_path: PathBuf, wallet_path: PathBuf) -> Result<()> {
     println!("🔗 Testing Commitment Binding...");
     println!("═══════════════════════════════════════════════\n");
-    
+
     // Load transaction
     let tx_json = fs::read_to_string(&tx_path)?;
     let tx: TransactionStark = serde_json::from_str(&tx_json)?;
-    
+
     // Load wallet
     let (_, _, _, kyber_sk, wallet_address) = get_all_keys_from_wallet(&wallet_path, None)?;
-    
+
     println!("Transaction: {}", hex::encode(&tx.id()[..16]));
     println!("Wallet Address: {}\n", hex::encode(&wallet_address[..16]));
-    
+
     for (i, output) in tx.outputs.iter().enumerate() {
         println!("Output {} Commitment Test:", i + 1);
         println!("─────────────────────────────────────────");
         println!();
-        
+
         // Show commitment
         println!("📋 Commitment (Public):");
         println!("   {}", hex::encode(&output.value_commitment));
         println!();
-        
+
         // Decrypt value
         println!("🔓 Decrypting value...");
         match output.decrypt_and_verify(&kyber_sk) {
             Some(value) => {
                 println!("   ✅ Decrypted value: {} TT", value);
                 println!();
-                
+
                 // Recompute commitment
                 println!("🔗 Recomputing commitment from decrypted value...");
                 // We need blinding factor, but we can't get it without decrypting
@@ -364,7 +402,7 @@ fn cmd_test_commitment(tx_path: PathBuf, wallet_path: PathBuf) -> Result<()> {
                 println!("   ✅ Commitment binding verified!");
                 println!("   ✅ Decrypted value matches commitment");
                 println!();
-                
+
                 // Test: Try to create different commitment with same value
                 println!("🧪 Testing Commitment Uniqueness...");
                 let mut test_h = Sha3_256::new();
@@ -373,7 +411,7 @@ fn cmd_test_commitment(tx_path: PathBuf, wallet_path: PathBuf) -> Result<()> {
                 test_h.update(&[0u8; 32]); // Different blinding
                 test_h.update(&output.recipient);
                 let test_commitment: [u8; 32] = test_h.finalize().into();
-                
+
                 if test_commitment != output.value_commitment {
                     println!("   ✅ Different blinding → Different commitment");
                     println!("   ✅ Commitment is UNIQUE per (value, blinding) pair");
@@ -381,7 +419,7 @@ fn cmd_test_commitment(tx_path: PathBuf, wallet_path: PathBuf) -> Result<()> {
                     println!("   ⚠️  Commitment collision detected!");
                 }
                 println!();
-                
+
                 println!("✅ Commitment Binding Test PASSED");
                 println!("   • Value is cryptographically bound to commitment");
                 println!("   • Cannot change value without breaking commitment");
@@ -394,20 +432,20 @@ fn cmd_test_commitment(tx_path: PathBuf, wallet_path: PathBuf) -> Result<()> {
         }
         println!();
     }
-    
+
     Ok(())
 }
 
 fn cmd_audit(tx_path: PathBuf, wallet_opt: Option<PathBuf>) -> Result<()> {
     println!("🔍 FULL PRIVACY AUDIT");
     println!("═══════════════════════════════════════════════\n");
-    
+
     let tx_json = fs::read_to_string(&tx_path)?;
     let tx: TransactionStark = serde_json::from_str(&tx_json)?;
-    
+
     println!("Transaction: {}", hex::encode(&tx.id()));
     println!("Timestamp: {}\n", tx.timestamp);
-    
+
     // 1. STARK Proof Verification
     println!("1️⃣  STARK PROOF VERIFICATION");
     println!("─────────────────────────────────────────");
@@ -421,7 +459,7 @@ fn cmd_audit(tx_path: PathBuf, wallet_opt: Option<PathBuf>) -> Result<()> {
         println!("❌ Proofs INVALID ({}/{})", valid, total);
     }
     println!();
-    
+
     // 2. Encryption Analysis
     println!("2️⃣  ENCRYPTION ANALYSIS");
     println!("─────────────────────────────────────────");
@@ -431,7 +469,7 @@ fn cmd_audit(tx_path: PathBuf, wallet_opt: Option<PathBuf>) -> Result<()> {
         println!("   Structure: [Nonce || AEAD || Kyber-CT]");
         println!("   ✅ Value is ENCRYPTED");
         println!("   ✅ Cannot be read without secret key");
-        
+
         // Check if we can decrypt
         if let Some(wallet) = &wallet_opt {
             if let Ok((_, _, _, kyber_sk, addr)) = get_all_keys_from_wallet(wallet, None) {
@@ -450,7 +488,7 @@ fn cmd_audit(tx_path: PathBuf, wallet_opt: Option<PathBuf>) -> Result<()> {
         }
         println!();
     }
-    
+
     // 3. Address Privacy
     println!("3️⃣  ADDRESS PRIVACY");
     println!("─────────────────────────────────────────");
@@ -462,7 +500,7 @@ fn cmd_audit(tx_path: PathBuf, wallet_opt: Option<PathBuf>) -> Result<()> {
         println!("   ✅ Cannot link to public key without additional info");
         println!();
     }
-    
+
     // 4. Commitment Privacy
     println!("4️⃣  COMMITMENT PRIVACY");
     println!("─────────────────────────────────────────");
@@ -474,7 +512,7 @@ fn cmd_audit(tx_path: PathBuf, wallet_opt: Option<PathBuf>) -> Result<()> {
         println!("   ✅ Requires decryption to verify value");
         println!();
     }
-    
+
     // 5. Summary
     println!("📋 PRIVACY AUDIT SUMMARY");
     println!("═══════════════════════════════════════════════");
@@ -490,7 +528,6 @@ fn cmd_audit(tx_path: PathBuf, wallet_opt: Option<PathBuf>) -> Result<()> {
     println!("   • Zero-knowledge proofs");
     println!("   • Encrypted values");
     println!("   • Hashed addresses");
-    
+
     Ok(())
 }
-
