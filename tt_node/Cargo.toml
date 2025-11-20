@@ -17,6 +17,7 @@ path = "src/bin/simple_node.rs"
 [[bin]]
 name = "advanced_node"
 path = "src/bin/advanced_node.rs"
+required-features = ["wallet"]
 
 [[bin]]
 name = "tt_wallet"
