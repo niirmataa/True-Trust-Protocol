@@ -16,11 +16,9 @@ mod golden_trio;
 mod consensus_weights;
 mod consensus_pro;
 mod snapshot_pro;
-mod snapshot_witness;
-mod stark_security;
 mod stark_full;
 mod tx_stark;
-mod range_proof_winterfell; // i tak jest pod cfg(feature)
+mod winterfell_range; // i tak jest pod cfg(feature)
 mod crypto;           // <-- tu siedzi kmac.rs i kmac_drbg.rs
 mod pqc_verification;
 
