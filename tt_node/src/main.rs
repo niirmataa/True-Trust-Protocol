@@ -42,6 +42,7 @@ mod crypto;
 mod pqc_verification;
 mod p2p;
 mod node_core;
+mod transaction;
 
 
 #[cfg(feature = "wallet")]

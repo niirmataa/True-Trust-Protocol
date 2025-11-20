@@ -71,15 +71,17 @@ pub fn select_leader_deterministic(
             h.update(&w.to_be_bytes());
             let digest = h.finalize();
 
-            // Interpret hash as u128 (lowest 16B) – HIGHER value is better.
+            // Interpret hash as u128 (lowest 16B) – used only as tie-breaker.
             let mut score_bytes = [0u8; 16];
             score_bytes.copy_from_slice(&digest[16..32]);
             let score = u128::from_be_bytes(score_bytes);
 
-            (score, *id)
+            // Primary key: weight (higher = better). Secondary: hashed score for
+            // deterministic tie-breaking between equal weights.
+            (w, score, *id)
         })
-        .max_by_key(|(score, _)| *score)
-        .map(|(_, id)| id)
+        .max_by(|(w1, s1, _), (w2, s2, _)| (w1, s1).cmp(&(w2, s2)))
+        .map(|(_, _, id)| id)
 }
 
 #[cfg(test)]

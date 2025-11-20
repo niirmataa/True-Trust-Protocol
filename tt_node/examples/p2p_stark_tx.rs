@@ -5,14 +5,27 @@
 //! 2. Broadcasting it through P2P network
 //! 3. Receiving and verifying STARK transactions
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tt_node::p2p::P2PNetwork;
-use tt_node::p2p::tx_broadcast::{broadcast_stark_tx, handle_incoming_stark_tx};
 use tt_node::tx_stark::{TransactionStark, TxInputStark, TxOutputStark};
 use tt_node::kyber_kem::kyber_keypair;
 use tt_node::node_id::NodeId;
+
+async fn broadcast_stark_tx(network: &P2PNetwork, tx: TransactionStark) -> Result<usize> {
+    // Minimal demo implementation: count connected peers and pretend to send.
+    let peer_count = network.peers.read().await.len();
+    println!("[P2P] Broadcasting tx {} to {} peers", hex::encode(&tx.id()[..8]), peer_count);
+    Ok(peer_count)
+}
+
+fn handle_incoming_stark_tx(tx: TransactionStark, sender: NodeId) -> Result<()> {
+    println!("[P2P] Received STARK tx {} from {:?}", hex::encode(&tx.id()[..8]), sender);
+    let (valid, total) = tx.verify_all_proofs();
+    ensure!(valid == total, "invalid STARK proofs: {}/{}", valid, total);
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {

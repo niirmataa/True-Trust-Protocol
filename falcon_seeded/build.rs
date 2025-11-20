@@ -18,7 +18,8 @@ fn main() {
         .file("pqclean/crypto_sign/falcon-512/clean/rng.c")
         .file("pqclean/crypto_sign/falcon-512/clean/sign.c")
         .file("pqclean/crypto_sign/falcon-512/clean/vrfy.c")
-        .file("pqclean/common/randombytes.c")
+        .file("pqclean/common/fips202.c")
+        .file("src/ffi.c")
         .include("pqclean/crypto_sign/falcon-512/clean")
         .include("pqclean/common")
         .compile("falcon512");
