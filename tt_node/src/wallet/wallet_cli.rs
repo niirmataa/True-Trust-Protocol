@@ -159,7 +159,7 @@ enum PepperPolicy {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct WalletHeader {
+pub(crate) struct WalletHeader {
     version: u32,
     kdf: KdfHeader,
     aead: AeadKind,
@@ -167,7 +167,7 @@ struct WalletHeader {
     nonce24_opt: Option<[u8; 24]>,
     padding_block: u16,
     pepper: PepperPolicy,
-    wallet_id: [u8; 16],
+    pub(crate) wallet_id: [u8; 16],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -190,7 +190,7 @@ enum KdfKind {
 /// Sekretny payload portfela v5 (PQ-only)
 #[derive(Clone, Serialize, Deserialize, Zeroize)]
 #[zeroize(drop)]
-struct WalletSecretPayloadV3 {
+pub(crate) struct WalletSecretPayloadV3 {
     /// Główny seed (m.in. dla Shamir)
     master32: [u8; 32],
 
@@ -204,9 +204,9 @@ struct WalletSecretPayloadV3 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct WalletFile {
-    header: WalletHeader,
-    enc: Vec<u8>,
+pub(crate) struct WalletFile {
+    pub(crate) header: WalletHeader,
+    pub(crate) enc: Vec<u8>,
 }
 
 /// Zestaw kluczy PQ (już zmaterializowany z bytes)
@@ -220,7 +220,7 @@ pub struct Keyset {
 }
 
 impl Keyset {
-    fn from_payload_v3(p: &WalletSecretPayloadV3) -> Result<Self> {
+    pub(crate) fn from_payload_v3(p: &WalletSecretPayloadV3) -> Result<Self> {
         let falcon_sk = falcon512::SecretKey::from_bytes(&p.falcon_sk_bytes)
             .map_err(|_| anyhow!("Falcon SK invalid"))?;
         let falcon_pk = falcon512::PublicKey::from_bytes(&p.falcon_pk_bytes)
@@ -450,7 +450,7 @@ fn encrypt_wallet<T: Serialize>(
     }
 }
 
-fn decrypt_wallet_v3(
+pub(crate) fn decrypt_wallet_v3(
     enc: &[u8],
     password: &str,
     hdr: &WalletHeader,
@@ -511,7 +511,7 @@ fn decrypt_wallet_v3(
  * WALLET FILE OPERATIONS
  * ====================================================================================== */
 
-fn load_wallet_file(path: &PathBuf) -> Result<WalletFile> {
+pub(crate) fn load_wallet_file(path: &PathBuf) -> Result<WalletFile> {
     let meta = fs::metadata(path)?;
     ensure!(meta.len() <= WALLET_MAX_SIZE, "wallet file too large");
     let buf = fs::read(path)?;
