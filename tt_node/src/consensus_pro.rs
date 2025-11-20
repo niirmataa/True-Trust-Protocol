@@ -191,6 +191,11 @@ impl ConsensusPro {
         self.validators.get(id)
     }
 
+    /// Returns an iterator over all validator states.
+    pub fn validators_iter(&self) -> impl Iterator<Item = &ValidatorState> {
+        self.validators.values()
+    }
+
     /// Current validator weight in consensus (per deterministic integer function).
     pub fn compute_validator_weight(&self, id: &ValidatorId) -> Option<Weight> {
         let v = self.validators.get(id)?;
