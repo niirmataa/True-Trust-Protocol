@@ -11,6 +11,14 @@ name = "tt_node"
 path = "src/main.rs"
 
 [[bin]]
+name = "simple_node"
+path = "src/bin/simple_node.rs"
+
+[[bin]]
+name = "advanced_node"
+path = "src/bin/advanced_node.rs"
+
+[[bin]]
 name = "tt_wallet"
 path = "src/bin/wallet.rs"
 required-features = ["wallet"]
@@ -18,6 +26,10 @@ required-features = ["wallet"]
 [[example]]
 name = "mining_demo"
 path = "examples/mining_demo.rs"
+
+[[example]]
+name = "multi_node"
+path = "examples/multi_node.rs"
 
 [dependencies]
 anyhow = "1.0"
