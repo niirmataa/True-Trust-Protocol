@@ -51,10 +51,10 @@ use rand::RngCore;
 use sha2::{Sha256, Digest};
 use sha3::Sha3_256;
 
-use crate::falcon_sigs::{FalconPublicKey, FalconSecretKey, BlockSignature, falcon_sign_block, falcon_verify_block};
-use crate::kyber_kem::{KyberPublicKey, KyberSecretKey, KyberSharedSecret, KyberCiphertext, kyber_encapsulate, kyber_decapsulate};
+use crate::falcon_sigs::{FalconPublicKey, FalconSecretKey, SignedNullifier, falcon_sign_nullifier, falcon_verify_nullifier};
+use pqcrypto_traits::sign::SignedMessage;
+use crate::kyber_kem::{KyberPublicKey, KyberSecretKey, kyber_encapsulate, kyber_decapsulate};
 use crate::crypto_kmac_consensus::kmac256_hash;
-use crate::core::Hash32;
 
 // =================== Constants ===================
 
@@ -149,6 +149,9 @@ pub enum P2pCryptoError {
     
     #[error("Falcon signature error: {0}")]
     SigError(String),
+    
+    #[error("Signature error: {0}")]
+    SignatureError(String),
     
     #[error("AEAD encryption/decryption failed")]
     AeadError,
@@ -474,16 +477,17 @@ pub fn handle_client_hello(
 
     // Sign transcript hash
     let transcript_hash = transcript.clone_state().finalize();
-    let sig = falcon_sign_block(&transcript_hash, &server_id.falcon_sk);
+    let sig = falcon_sign_nullifier(&transcript_hash, &server_id.falcon_sk)
+        .map_err(|e| P2pCryptoError::SignatureError(e.to_string()))?;
 
     // Final ServerHello with signature
     let sh = ServerHello {
-        sig: sig.signed_message_bytes.clone(),
+        sig: sig.as_bytes().to_vec(),
         ..sh_unsigned
     };
 
     // Update transcript with signature
-    transcript.update(b"SIG_S", &sig.signed_message_bytes);
+    transcript.update(b"SIG_S", &sh.sig);
 
     Ok((sh, session_key, transcript))
 }
@@ -550,8 +554,10 @@ pub fn handle_server_hello(
         signed_message_bytes: sh.sig.clone(),
     };
     
-    falcon_verify_block(&transcript_hash, &server_sig, &server_falcon_pk)
-        .map_err(|e| P2pCryptoError::SigError(e.to_string()))?;
+    falcon_verify_nullifier(&transcript_hash, &server_sig, &server_falcon_pk)
+        .map_err(|e| P2pCryptoError::SignatureError(e.to_string()))?;
+    Ok(())
+        .map_err(|e: anyhow::Error| P2pCryptoError::SignatureError(e.to_string()))?;
 
     // Update transcript with verified signature
     transcript.update(b"SIG_S", &sh.sig);
@@ -568,14 +574,15 @@ pub fn build_client_finished(
 
     // Sign full transcript
     let transcript_hash = transcript.clone_state().finalize();
-    let sig = falcon_sign_block(&transcript_hash, &client_id.falcon_sk);
+    let sig = falcon_sign_nullifier(&transcript_hash, &client_id.falcon_sk)
+        .map_err(|e| P2pCryptoError::SignatureError(e.to_string()))?;
 
     let cf = ClientFinished {
-        sig: sig.signed_message_bytes.clone(),
+        sig: sig.as_bytes().to_vec(),
     };
 
     // Update transcript with signature
-    transcript.update(b"SIG_C", &sig.signed_message_bytes);
+    transcript.update(b"SIG_C", &cf.sig);
 
     Ok((cf, transcript))
 }
@@ -599,8 +606,10 @@ pub fn verify_client_finished(
         signed_message_bytes: cf.sig.clone(),
     };
     
-    falcon_verify_block(&transcript_hash, &sig, &client_pk)
-        .map_err(|e| P2pCryptoError::SigError(e.to_string()))?;
+    falcon_verify_nullifier(&transcript_hash, &sig, &client_pk)
+        .map_err(|e| P2pCryptoError::SignatureError(e.to_string()))?;
+    Ok(())
+        .map_err(|e: anyhow::Error| P2pCryptoError::SignatureError(e.to_string()))?;
 
     // Update transcript with verified signature
     transcript.update(b"SIG_C", &cf.sig);

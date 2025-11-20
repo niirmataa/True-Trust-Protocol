@@ -13,7 +13,7 @@ use crate::core::Hash32;
 
 // Use our STARK (BabyBear for now, Goldilocks needs API)
 // TODO: Add public API to stark_goldilocks and use that
-use crate::stark_full::{STARKProver, STARKVerifier};
+use crate::stark_full::{STARKProof, STARKProver, STARKVerifier};
 
 /// Kyber768 ciphertext size (1088 bytes)
 const KYBER768_CT_BYTES: usize = 1088;
@@ -71,8 +71,8 @@ impl TxOutputStark {
     }
 
     pub fn verify(&self) -> bool {
-        if let Ok(proof) = bincode::deserialize(&self.stark_proof) {
-            STARKVerifier::verify(&proof)
+        if let Ok(proof) = bincode::deserialize::<STARKProof>(&self.stark_proof) {
+            STARKVerifier::verify_proof(&proof)
         } else {
             false
         }

@@ -1,57 +1,26 @@
-//! E2E Demo
-use sha2::{Digest, Sha256};
-
 fn main() {
-    println!("\\n════════════════════════════════════════════");
-    println!("  TRUE_TRUST E2E Demo: Bob → Alice");
-    println!("════════════════════════════════════════════\\n");
-    
-    println!("🔑 Generating identities...");
-    let alice_id = generate_node_id("Alice");
-    let bob_id = generate_node_id("Bob");
-    println!("  ✅ Alice: {}", hex::encode(&alice_id[..8]));
-    println!("  ✅ Bob: {}", hex::encode(&bob_id[..8]));
-    
-    println!("\\n💸 Creating transaction...");
-    let tx_hash = create_tx(&bob_id, &alice_id, 100000);
-    println!("  ✅ TX hash: {}", hex::encode(&tx_hash[..8]));
-    println!("  💰 Amount: 100,000 tokens");
-    
-    println!("\\n🤝 P2P exchange...");
-    println!("  📤 Bob → Alice");
-    println!("  📥 Alice received");
-    
-    println!("\\n⚖️  Consensus...");
-    simulate_consensus(&alice_id, &bob_id);
-    
-    println!("\\n✅ Demo complete!\\n");
-}
-
-fn generate_node_id(name: &str) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(b"NODE");
-    h.update(name.as_bytes());
-    let d = h.finalize();
-    let mut id = [0u8; 32];
-    id.copy_from_slice(&d);
-    id
-}
-
-fn create_tx(s: &[u8;32], r: &[u8;32], amt: u64) -> [u8;32] {
-    let mut h = Sha256::new();
-    h.update(b"TX");
-    h.update(s);
-    h.update(r);
-    h.update(&amt.to_le_bytes());
-    let d = h.finalize();
-    let mut tx = [0u8; 32];
-    tx.copy_from_slice(&d);
-    tx
-}
-
-fn simulate_consensus(a: &[u8;32], b: &[u8;32]) {
-    println!("  📊 Validators: 2");
-    println!("  ⚖️  Computing weights...");
-    println!("  👑 Leader: Alice");
-    println!("  ✅ Consensus OK");
+println!("CONSENSUS TEST");
+let mut c = tt_node::consensus_pro::ConsensusPro::new_default();
+let (apk,_) = tt_node::falcon_sigs::falcon_keypair();
+let a = tt_node::node_id::node_id_from_falcon_pk(&apk);
+let (bpk,_) = tt_node::falcon_sigs::falcon_keypair();
+let b = tt_node::node_id::node_id_from_falcon_pk(&bpk);
+let (fpk,_) = tt_node::falcon_sigs::falcon_keypair();
+let f = tt_node::node_id::node_id_from_falcon_pk(&fpk);
+c.register_validator(a, 1000000000u128);
+c.register_validator(b, 500000000u128);
+c.register_validator(f, 100000000u128);
+c.recompute_all_stake_q();
+c.record_quality_f64(&a, 0.80);
+c.record_quality_f64(&b, 0.95);
+c.record_quality_f64(&f, 0.60);
+c.update_all_trust();
+let aw = c.compute_validator_weight(&a).unwrap();
+let bw = c.compute_validator_weight(&b).unwrap();
+let fw = c.compute_validator_weight(&f).unwrap();
+let tw = aw+bw+fw;
+let r: u128 = 1000000;
+println!("Alice: {} tokens ({}%)", r*aw/tw, aw*100/tw);
+println!("Bob:   {} tokens ({}%)", r*bw/tw, bw*100/tw);
+println!("Frank: {} tokens ({}%)", r*fw/tw, fw*100/tw);
 }

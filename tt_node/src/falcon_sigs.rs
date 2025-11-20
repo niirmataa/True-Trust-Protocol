@@ -70,6 +70,13 @@ impl Drop for SignedNullifier {
     }
 }
 
+impl SignedNullifier {
+    /// Get the signed message as bytes
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.signed_message_bytes
+    }
+}
+
 /* ============================================================================
  * Key Generation
  * ========================================================================== */

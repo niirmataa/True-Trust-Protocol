@@ -31,7 +31,6 @@ use sha3::{
 use aes_gcm_siv::{Aes256GcmSiv, Nonce as Nonce12Siv};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce as Nonce24};
 use argon2::{Algorithm, Argon2, Params, Version};
-use dirs::config_dir;
 
 // PQC
 use pqcrypto_falcon::falcon512;
@@ -294,7 +293,7 @@ impl OsLocalPepper {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let base = config_dir().unwrap_or_else(|| PathBuf::from("."));
+            let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
             Ok(base.join("tt").join("pepper").join(hex::encode(id)))
         }
     }

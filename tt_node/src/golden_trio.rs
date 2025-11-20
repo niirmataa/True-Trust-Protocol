@@ -23,19 +23,18 @@
 use crate::rtt_pro::{Q, ONE_Q};
 
 /// Hard Trust / Quality Metrics (6 components)
+/// ⚠️ ONLY POST-QUANTUM! No Bulletproofs, no ECC!
 #[derive(Clone, Debug, Default)]
 pub struct HardTrustMetrics {
     // T1: Block Production
     pub blocks_produced: u64,
     pub target_blocks: u64,
     
-    // T2: Proof Generation
-    pub bulletproofs_count: u64,
-    pub bulletproofs_valid: u64,
-    pub zk_proofs_count: u64,
-    pub zk_proofs_valid: u64,
-    pub pow_proofs_count: u64,
-    pub pow_proofs_valid: u64,
+    // T2: Proof Generation (ONLY PQ!)
+    pub stark_proofs_count: u64,      // Winterfell STARK (PQ-safe)
+    pub stark_proofs_valid: u64,
+    pub randomx_proofs_count: u64,    // RandomX PoW (PQ-safe)
+    pub randomx_proofs_valid: u64,
     
     // T3: Uptime
     pub uptime_slots: u64,
@@ -81,19 +80,18 @@ impl Default for TrustWeights {
 }
 
 /// Proof sub-weights (dla T2, suma = 1.0)
+/// ⚠️ ONLY POST-QUANTUM!
 #[derive(Clone, Debug)]
 pub struct ProofWeights {
-    pub bp: f64,   // w_bp = 0.4
-    pub zk: f64,   // w_zk = 0.4
-    pub pow: f64,  // w_pow = 0.2
+    pub stark: f64,     // w_stark = 0.7 (Winterfell range proofs)
+    pub randomx: f64,   // w_randomx = 0.3 (PoW quality)
 }
 
 impl Default for ProofWeights {
     fn default() -> Self {
         Self {
-            bp: 0.4,
-            zk: 0.4,
-            pow: 0.2,
+            stark: 0.7,     // STARK dominant (main proofs)
+            randomx: 0.3,   // RandomX PoW
         }
     }
 }
@@ -128,25 +126,19 @@ pub fn compute_hard_trust(
         0.0
     };
     
-    // T2: Proof Generation
-    let bp_ratio = if metrics.bulletproofs_count > 0 {
-        metrics.bulletproofs_valid as f64 / metrics.bulletproofs_count as f64
+    // T2: Proof Generation (ONLY POST-QUANTUM!)
+    let stark_ratio = if metrics.stark_proofs_count > 0 {
+        metrics.stark_proofs_valid as f64 / metrics.stark_proofs_count as f64
     } else {
         0.0
     };
-    let zk_ratio = if metrics.zk_proofs_count > 0 {
-        metrics.zk_proofs_valid as f64 / metrics.zk_proofs_count as f64
+    let randomx_ratio = if metrics.randomx_proofs_count > 0 {
+        metrics.randomx_proofs_valid as f64 / metrics.randomx_proofs_count as f64
     } else {
         0.0
     };
-    let pow_ratio = if metrics.pow_proofs_count > 0 {
-        metrics.pow_proofs_valid as f64 / metrics.pow_proofs_count as f64
-    } else {
-        0.0
-    };
-    let t_proofs = proof_weights.bp * bp_ratio +
-                   proof_weights.zk * zk_ratio +
-                   proof_weights.pow * pow_ratio;
+    let t_proofs = proof_weights.stark * stark_ratio +
+                   proof_weights.randomx * randomx_ratio;
     
     // T3: Uptime
     let t_uptime = if metrics.eligible_slots > 0 {
@@ -276,12 +268,10 @@ mod tests {
         let metrics = HardTrustMetrics {
             blocks_produced: 100,
             target_blocks: 100,
-            bulletproofs_valid: 50,
-            bulletproofs_count: 50,
-            zk_proofs_valid: 25,
-            zk_proofs_count: 25,
-            pow_proofs_valid: 10,
-            pow_proofs_count: 10,
+            stark_proofs_valid: 50,
+            stark_proofs_count: 50,
+            randomx_proofs_valid: 10,
+            randomx_proofs_count: 10,
             uptime_slots: 1000,
             eligible_slots: 1000,
             lock_days: 365,
