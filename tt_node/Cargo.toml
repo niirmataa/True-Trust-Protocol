@@ -15,6 +15,10 @@ name = "tt_wallet"
 path = "src/bin/wallet.rs"
 required-features = ["wallet"]
 
+[[example]]
+name = "mining_demo"
+path = "examples/mining_demo.rs"
+
 [dependencies]
 anyhow = "1.0"
 thiserror = "1.0"

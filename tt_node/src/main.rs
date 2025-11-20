@@ -329,13 +329,14 @@ fn run_consensus_demo(validators: u32, rounds: u32) -> Result<()> {
     println!();
     
     // Simulate rounds
-    for slot in 0..rounds {
+    for slot in 0..rounds as u64 {
         println!("=== Round {} ===", slot + 1);
         
         // Select leader
         // Create a deterministic beacon from slot number
         let mut beacon = [0u8; 32];
-        beacon[..8].copy_from_slice(&slot.to_le_bytes());
+        let slot_bytes = slot.to_le_bytes();
+        beacon[..8].copy_from_slice(&slot_bytes);
         let leader = consensus.select_leader(beacon).ok_or_else(|| anyhow!("No leader selected"))?;
         let leader_info = validator_ids.iter()
             .position(|(id, _, _)| *id == leader)

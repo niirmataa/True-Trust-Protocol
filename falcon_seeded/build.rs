@@ -11,7 +11,6 @@ fn main() {
     cc::Build::new()
         .file("pqclean/crypto_sign/falcon-512/clean/codec.c")
         .file("pqclean/crypto_sign/falcon-512/clean/common.c")
-        .file("pqclean/crypto_sign/falcon-512/clean/falcon.c")
         .file("pqclean/crypto_sign/falcon-512/clean/fft.c")
         .file("pqclean/crypto_sign/falcon-512/clean/fpr.c")
         .file("pqclean/crypto_sign/falcon-512/clean/keygen.c")
