@@ -1,6 +1,13 @@
 [workspace]
 members = [
-    "falcon_seeded",
-    "quantum_falcon_wallet",
-    "tt_priv_cli",
+    "tt_node",
+    "falcon_seeded"
 ]
+
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
