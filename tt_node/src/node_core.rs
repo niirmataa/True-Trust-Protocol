@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::chain_store::ChainStore;
 use crate::consensus_pro::ConsensusPro;
+use crate::transaction::TxPool;
 
 /// Core blockchain node implementation
 pub struct NodeCore {
@@ -17,6 +18,9 @@ pub struct NodeCore {
 
     /// Consensus engine
     pub consensus: Arc<RwLock<ConsensusPro>>,
+
+    /// Transaction pool (PQ-signed transactions)
+    pub tx_pool: Arc<RwLock<TxPool>>,
 
     /// Node configuration
     pub config: NodeConfig,
@@ -50,6 +54,9 @@ impl NodeCore {
         // Initialize consensus
         let consensus = Arc::new(RwLock::new(ConsensusPro::new_default()));
 
+        // Initialize mempool
+        let tx_pool = Arc::new(RwLock::new(TxPool::new()));
+
         // Default configuration
         let config = NodeConfig {
             data_dir,
@@ -60,6 +67,7 @@ impl NodeCore {
         Ok(Self {
             chain_store,
             consensus,
+            tx_pool,
             config,
             is_validator,
         })

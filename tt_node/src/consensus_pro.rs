@@ -48,6 +48,15 @@ pub struct ValidatorState {
     pub trust_q: TrustScore,
 }
 
+/// Summary statistics for monitoring and RPC exposure.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConsensusStats {
+    pub validator_count: usize,
+    pub total_stake_raw: StakeRaw,
+    pub avg_trust: f64,
+    pub avg_quality: f64,
+}
+
 /// Main PRO consensus object.
 pub struct ConsensusPro {
     /// RTT PRO – maintains trust(v) based on history and vouching.
@@ -201,6 +210,27 @@ impl ConsensusPro {
     /// Returns an iterator over all validator states.
     pub fn validators_iter(&self) -> impl Iterator<Item = &ValidatorState> {
         self.validators.values()
+    }
+
+    /// Monitoring-friendly snapshot for RPC and dashboards.
+    pub fn stats(&self) -> ConsensusStats {
+        let validator_count = self.validators.len();
+        let mut trust_sum = 0.0f64;
+        let mut quality_sum = 0.0f64;
+
+        for v in self.validators.values() {
+            trust_sum += q_to_f64(v.trust_q);
+            quality_sum += q_to_f64(v.quality_q);
+        }
+
+        let denom = validator_count.max(1) as f64;
+
+        ConsensusStats {
+            validator_count,
+            total_stake_raw: self.total_stake_raw,
+            avg_trust: trust_sum / denom,
+            avg_quality: quality_sum / denom,
+        }
     }
 
     /// Current validator weight in consensus (per deterministic integer function).

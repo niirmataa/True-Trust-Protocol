@@ -33,10 +33,12 @@ mod falcon_sigs;
 mod golden_trio;
 mod hybrid_commit;
 mod kyber_kem;
+mod monitoring;
 mod node_core;
 mod node_id;
 mod p2p;
 mod pqc_verification;
+mod rpc;
 mod rtt_pro;
 mod snapshot_pro;
 mod snapshot_witness;
@@ -198,7 +200,7 @@ fn run_validator(
 
     rt.block_on(async {
         // Initialize node
-        let node = node_core::NodeCore::new(data_dir, true)?;
+        let node = Arc::new(node_core::NodeCore::new(data_dir, true)?);
 
         // Load or generate validator keys
         let (falcon_pk, falcon_sk) = if let Some(ks) = keystore {
@@ -216,6 +218,28 @@ fn run_validator(
         // Start P2P network
         println!("🌐 Starting P2P network on port {}...", p2p_port);
         let p2p = Arc::new(p2p::P2PNetwork::new(p2p_port, node_id).await?);
+        p2p.clone().start().await?;
+
+        // Monitoring + RPC server
+        let monitoring = Arc::new(monitoring::MonitoringService::new(
+            Arc::clone(&node.chain_store),
+            Arc::clone(&node.consensus),
+            Arc::clone(&node.tx_pool),
+            Arc::clone(&p2p),
+        ));
+
+        let rpc_server = rpc::RpcServer::new(
+            rpc_port,
+            node_id,
+            true,
+            Arc::clone(&node),
+            Arc::clone(&monitoring),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = rpc_server.start().await {
+                eprintln!("[RPC] server error: {e}");
+            }
+        });
 
         // Register as validator in consensus
         let mut consensus = consensus_pro::ConsensusPro::new_default();
@@ -248,7 +272,7 @@ fn run_full_node(data_dir: PathBuf, p2p_port: u16, rpc_port: u16) -> Result<()> 
 
     rt.block_on(async {
         // Initialize node
-        let node = node_core::NodeCore::new(data_dir, false)?;
+        let node = Arc::new(node_core::NodeCore::new(data_dir, false)?);
 
         // Generate node identity
         let (falcon_pk, _) = falcon_sigs::falcon_keypair();
@@ -258,6 +282,28 @@ fn run_full_node(data_dir: PathBuf, p2p_port: u16, rpc_port: u16) -> Result<()> 
         // Start P2P network
         println!("🌐 Starting P2P network on port {}...", p2p_port);
         let p2p = Arc::new(p2p::P2PNetwork::new(p2p_port, node_id).await?);
+        p2p.clone().start().await?;
+
+        // Monitoring + RPC server
+        let monitoring = Arc::new(monitoring::MonitoringService::new(
+            Arc::clone(&node.chain_store),
+            Arc::clone(&node.consensus),
+            Arc::clone(&node.tx_pool),
+            Arc::clone(&p2p),
+        ));
+
+        let rpc_server = rpc::RpcServer::new(
+            rpc_port,
+            node_id,
+            false,
+            Arc::clone(&node),
+            Arc::clone(&monitoring),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = rpc_server.start().await {
+                eprintln!("[RPC] server error: {e}");
+            }
+        });
 
         println!("✅ Full node started successfully!");
         println!("⏳ Running... Press Ctrl+C to stop");

@@ -24,6 +24,11 @@ name = "tt_wallet"
 path = "src/bin/wallet.rs"
 required-features = ["wallet"]
 
+[[bin]]
+name = "verify_privacy"
+path = "src/bin/verify_privacy.rs"
+required-features = ["wallet"]
+
 [[example]]
 name = "mining_demo"
 path = "examples/mining_demo.rs"
@@ -61,6 +66,7 @@ pqcrypto-traits = "0.3"
 
 # Async / networking
 tokio = { version = "1.38", features = ["full"] }
+hyper = { version = "0.14", features = ["full"] }
 
 # CLI and logging
 clap = { version = "4.5", features = ["derive"] }
