@@ -18,7 +18,8 @@ fn main() {
         .file("pqclean/crypto_sign/falcon-512/clean/rng.c")
         .file("pqclean/crypto_sign/falcon-512/clean/sign.c")
         .file("pqclean/crypto_sign/falcon-512/clean/vrfy.c")
-        .file("pqclean/common/randombytes.c")
+        .file("pqclean/common/fips202.c")
+        .file("src/ffi.c")  // Our FFI wrapper with RNG injection
         .include("pqclean/crypto_sign/falcon-512/clean")
         .include("pqclean/common")
         .compile("falcon512");
@@ -29,4 +30,5 @@ fn main() {
     
     // Re-run build if C files change
     println!("cargo:rerun-if-changed=pqclean/");
+    println!("cargo:rerun-if-changed=src/ffi.c");
 }
