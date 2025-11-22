@@ -22,22 +22,22 @@ use std::fmt;
 pub struct SecurityParams {
     /// Field size (bits)
     pub field_bits: usize,
-    
+
     /// Field name (for reporting)
     pub field_name: String,
-    
+
     /// Number of FRI queries
     pub fri_queries: usize,
-    
+
     /// FRI blowup factor
     pub fri_blowup: usize,
-    
+
     /// FRI fold factor
     pub fri_fold_factor: usize,
-    
+
     /// Constraint degree (max degree of AIR constraints)
     pub constraint_degree: usize,
-    
+
     /// Domain size (trace length)
     pub domain_size: usize,
 }
@@ -55,20 +55,20 @@ impl SecurityParams {
             domain_size: 128,
         }
     }
-    
+
     /// Create Goldilocks configuration (production-grade)
     pub fn goldilocks() -> Self {
         Self {
             field_bits: 64,
             field_name: "Goldilocks".to_string(),
-            fri_queries: 80,       // 2× increase
-            fri_blowup: 16,        // 2× increase
-            fri_fold_factor: 4,    // 2× increase
+            fri_queries: 80,    // 2× increase
+            fri_blowup: 16,     // 2× increase
+            fri_fold_factor: 4, // 2× increase
             constraint_degree: 2,
             domain_size: 128,
         }
     }
-    
+
     /// Create BN254 configuration (maximum security)
     ///
     /// **NOTE:** To achieve 128-bit classical security, BN254 requires
@@ -82,21 +82,21 @@ impl SecurityParams {
         Self {
             field_bits: 254,
             field_name: "BN254".to_string(),
-            fri_queries: 160,      // 2× Goldilocks for 128-bit security
-            fri_blowup: 32,        // 2× Goldilocks for 128-bit security
+            fri_queries: 160, // 2× Goldilocks for 128-bit security
+            fri_blowup: 32,   // 2× Goldilocks for 128-bit security
             fri_fold_factor: 4,
             constraint_degree: 2,
             domain_size: 128,
         }
     }
-    
+
     /// Compute FRI soundness error (bits)
     ///
     /// **Formula:** -log₂(ε) where ε = soundness error
     ///
-    /// FRI soundness (simplified): 
-    /// ```
-    /// ε ≈ (ρ + ε₀)^q
+    /// FRI soundness (simplified):
+    /// ```text
+    /// eps ~= (rho + eps0)^q
     /// ```
     ///
     /// Where:
@@ -112,9 +112,8 @@ impl SecurityParams {
     /// **Reference:** "Concrete Security of STARKs" (StarkWare, 2021)
     pub fn soundness_bits(&self) -> f64 {
         // Query rate (fraction of domain queried)
-        let query_rate = self.fri_queries as f64 
-            / (self.domain_size * self.fri_blowup) as f64;
-        
+        let query_rate = self.fri_queries as f64 / (self.domain_size * self.fri_blowup) as f64;
+
         // Proximity parameter (conservative estimate)
         // For constraint degree d, ε₀ ≈ d / |F|
         // Simplified: use 0.5 (works for small fields, conservative for large)
@@ -123,17 +122,17 @@ impl SecurityParams {
         } else {
             self.constraint_degree as f64 / (1u64 << self.field_bits.min(63)) as f64
         };
-        
+
         // Soundness error per query round
         let error_per_query = query_rate + epsilon_0;
-        
+
         // Total error after q queries (union bound)
         let total_error = error_per_query.powi(self.fri_queries as i32);
-        
+
         // Convert to bits: -log₂(ε)
         -total_error.log2()
     }
-    
+
     /// Compute field collision resistance (bits)
     ///
     /// **Birthday paradox:** Collision resistance = field_size / 2
@@ -145,7 +144,7 @@ impl SecurityParams {
     pub fn field_collision_bits(&self) -> usize {
         self.field_bits / 2
     }
-    
+
     /// Compute hash collision resistance (bits)
     ///
     /// Merkle tree uses SHA-3-256:
@@ -154,7 +153,7 @@ impl SecurityParams {
     pub fn hash_collision_bits(&self) -> usize {
         128 // SHA-3-256
     }
-    
+
     /// Compute classical security level (bits)
     ///
     /// Dla STARK-ów realne bezpieczeństwo pochodzi z:
@@ -173,14 +172,14 @@ impl SecurityParams {
     pub fn classical_security_bits(&self) -> usize {
         let soundness_security = self.soundness_bits() as usize;
         let hash_security = self.hash_collision_bits();
-        
+
         // STARK security from proof system (FRI + Merkle)
         let stark_security = soundness_security.min(hash_security);
-        
+
         // Twardy limit: nie deklarujemy więcej niż field_bits
         stark_security.min(self.field_bits)
     }
-    
+
     /// Compute post-quantum security level (bits)
     ///
     /// **Grover's algorithm:** Quantum adversary gets √ speedup for:
@@ -193,17 +192,17 @@ impl SecurityParams {
         let classical = self.classical_security_bits();
         classical / 2
     }
-    
+
     /// Check if parameters meet target security level (classical)
     pub fn meets_security_target(&self, target_bits: usize) -> bool {
         self.classical_security_bits() >= target_bits
     }
-    
+
     /// Check if parameters meet quantum security target
     pub fn meets_quantum_security_target(&self, target_bits: usize) -> bool {
         self.quantum_security_bits() >= target_bits
     }
-    
+
     /// Estimate proof size (KB)
     ///
     /// **Components:**
@@ -219,19 +218,19 @@ impl SecurityParams {
         let field_bytes = (self.field_bits + 7) / 8;
         let num_layers = (self.domain_size as f64).log2() as usize;
         let merkle_path_len = (self.domain_size as f64).log2() as usize;
-        
+
         let trace_commit = 32;
         let constraint_commit = 32;
         let fri_commits = num_layers * 32;
-        
+
         // Per query: field_element per layer + merkle proof per layer
         let query_size = num_layers * (field_bytes + merkle_path_len * 32);
         let queries_total = self.fri_queries * query_size;
-        
+
         let total_bytes = trace_commit + constraint_commit + fri_commits + queries_total;
         total_bytes as f64 / 1024.0
     }
-    
+
     /// Estimate prover time (ms)
     ///
     /// **Rough model** (based on BabyBear benchmarks):
@@ -253,13 +252,13 @@ impl SecurityParams {
             // 256-bit field: ~10× slower
             10.0
         };
-        
+
         // FRI query cost scaling
         let query_factor = self.fri_queries as f64 / 40.0; // Baseline: 40 queries
-        
+
         baseline_ms * field_cost_factor * query_factor
     }
-    
+
     /// Generate security report
     pub fn generate_report(&self) -> SecurityReport {
         SecurityReport {
@@ -300,46 +299,101 @@ pub struct SecurityReport {
 
 impl fmt::Display for SecurityReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "╔══════════════════════════════════════════════════════════╗")?;
-        writeln!(f, "║          STARK SECURITY ANALYSIS REPORT                  ║")?;
-        writeln!(f, "╚══════════════════════════════════════════════════════════╝")?;
+        writeln!(
+            f,
+            "╔══════════════════════════════════════════════════════════╗"
+        )?;
+        writeln!(
+            f,
+            "║          STARK SECURITY ANALYSIS REPORT                  ║"
+        )?;
+        writeln!(
+            f,
+            "╚══════════════════════════════════════════════════════════╝"
+        )?;
         writeln!(f)?;
-        
+
         writeln!(f, "📊 Configuration: {}", self.params.field_name)?;
         writeln!(f, "   Field:        {} bits", self.params.field_bits)?;
         writeln!(f, "   FRI Queries:  {}", self.params.fri_queries)?;
         writeln!(f, "   FRI Blowup:   {}", self.params.fri_blowup)?;
         writeln!(f, "   Domain:       {}", self.params.domain_size)?;
         writeln!(f)?;
-        
+
         writeln!(f, "🔒 Security Levels:")?;
-        writeln!(f, "   Classical:    {} bits {}", 
-            self.classical_bits, 
-            if self.meets_128_bit { "✅" } else if self.meets_64_bit { "⚠️" } else { "❌" }
+        writeln!(
+            f,
+            "   Classical:    {} bits {}",
+            self.classical_bits,
+            if self.meets_128_bit {
+                "✅"
+            } else if self.meets_64_bit {
+                "⚠️"
+            } else {
+                "❌"
+            }
         )?;
-        writeln!(f, "   Quantum:      {} bits {}", 
+        writeln!(
+            f,
+            "   Quantum:      {} bits {}",
             self.quantum_bits,
-            if self.meets_quantum_64_bit { "✅" } else { "❌" }
+            if self.meets_quantum_64_bit {
+                "✅"
+            } else {
+                "❌"
+            }
         )?;
         writeln!(f, "   Soundness:    {:.1} bits", self.soundness_bits)?;
         writeln!(f)?;
-        
+
         writeln!(f, "🔍 Component Security:")?;
-        writeln!(f, "   Field:        {} bits (collision)", self.field_collision_bits)?;
-        writeln!(f, "   Hash (SHA-3): {} bits (collision)", self.hash_collision_bits)?;
+        writeln!(
+            f,
+            "   Field:        {} bits (collision)",
+            self.field_collision_bits
+        )?;
+        writeln!(
+            f,
+            "   Hash (SHA-3): {} bits (collision)",
+            self.hash_collision_bits
+        )?;
         writeln!(f)?;
-        
+
         writeln!(f, "✅ Target Compliance:")?;
-        writeln!(f, "   64-bit:       {}", if self.meets_64_bit { "✅ YES" } else { "❌ NO" })?;
-        writeln!(f, "   128-bit:      {}", if self.meets_128_bit { "✅ YES" } else { "❌ NO" })?;
-        writeln!(f, "   Q-64-bit:     {}", if self.meets_quantum_64_bit { "✅ YES" } else { "❌ NO" })?;
+        writeln!(
+            f,
+            "   64-bit:       {}",
+            if self.meets_64_bit {
+                "✅ YES"
+            } else {
+                "❌ NO"
+            }
+        )?;
+        writeln!(
+            f,
+            "   128-bit:      {}",
+            if self.meets_128_bit {
+                "✅ YES"
+            } else {
+                "❌ NO"
+            }
+        )?;
+        writeln!(
+            f,
+            "   Q-64-bit:     {}",
+            if self.meets_quantum_64_bit {
+                "✅ YES"
+            } else {
+                "❌ NO"
+            }
+        )?;
         writeln!(f)?;
-        
+
         writeln!(f, "⚡ Performance Estimates:")?;
         writeln!(f, "   Proof Size:   {:.1} KB", self.estimated_proof_kb)?;
         writeln!(f, "   Prover Time:  {:.0} ms", self.estimated_prover_ms)?;
         writeln!(f)?;
-        
+
         writeln!(f, "💡 Recommendations:")?;
         if self.meets_128_bit {
             writeln!(f, "   ✅ Excellent security for production use")?;
@@ -350,7 +404,7 @@ impl fmt::Display for SecurityReport {
             writeln!(f, "   ❌ Insufficient security for production")?;
             writeln!(f, "   ❌ Upgrade to Goldilocks (64-bit) or larger")?;
         }
-        
+
         Ok(())
     }
 }
@@ -362,12 +416,12 @@ impl fmt::Display for SecurityReport {
 /// Compare multiple configurations side-by-side
 pub fn compare_configs(configs: &[SecurityParams]) -> String {
     let reports: Vec<SecurityReport> = configs.iter().map(|c| c.generate_report()).collect();
-    
+
     let mut output = String::new();
     output.push_str("╔══════════════════════════════════════════════════════════════════╗\n");
     output.push_str("║          STARK CONFIGURATION COMPARISON                          ║\n");
     output.push_str("╚══════════════════════════════════════════════════════════════════╝\n\n");
-    
+
     // Header
     output.push_str(&format!("{:<15}", "Metric"));
     for report in &reports {
@@ -376,49 +430,49 @@ pub fn compare_configs(configs: &[SecurityParams]) -> String {
     output.push('\n');
     output.push_str(&"-".repeat(15 + reports.len() * 18));
     output.push('\n');
-    
+
     // Field bits
     output.push_str(&format!("{:<15}", "Field (bits)"));
     for report in &reports {
         output.push_str(&format!(" | {:<15}", report.params.field_bits));
     }
     output.push('\n');
-    
+
     // FRI queries
     output.push_str(&format!("{:<15}", "FRI Queries"));
     for report in &reports {
         output.push_str(&format!(" | {:<15}", report.params.fri_queries));
     }
     output.push('\n');
-    
+
     // Classical security
     output.push_str(&format!("{:<15}", "Classical (bit)"));
     for report in &reports {
         output.push_str(&format!(" | {:<15}", report.classical_bits));
     }
     output.push('\n');
-    
+
     // Quantum security
     output.push_str(&format!("{:<15}", "Quantum (bit)"));
     for report in &reports {
         output.push_str(&format!(" | {:<15}", report.quantum_bits));
     }
     output.push('\n');
-    
+
     // Proof size
     output.push_str(&format!("{:<15}", "Proof (KB)"));
     for report in &reports {
         output.push_str(&format!(" | {:<15.1}", report.estimated_proof_kb));
     }
     output.push('\n');
-    
+
     // Speed
     output.push_str(&format!("{:<15}", "Prove (ms)"));
     for report in &reports {
         output.push_str(&format!(" | {:<15.0}", report.estimated_prover_ms));
     }
     output.push('\n');
-    
+
     output
 }
 
@@ -429,46 +483,58 @@ pub fn compare_configs(configs: &[SecurityParams]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_babybear_security() {
         let params = SecurityParams::babybear();
         let report = params.generate_report();
-        
+
         println!("{}", report);
-        
+
         // BabyBear should NOT meet 64-bit security
-        assert!(!report.meets_64_bit, "BabyBear incorrectly claims 64-bit security");
+        assert!(
+            !report.meets_64_bit,
+            "BabyBear incorrectly claims 64-bit security"
+        );
         assert!(!report.meets_128_bit);
     }
-    
+
     #[test]
     fn test_goldilocks_security() {
         let params = SecurityParams::goldilocks();
         let report = params.generate_report();
-        
+
         println!("{}", report);
-        
+
         // Goldilocks should meet 64-bit, but not 128-bit
-        assert!(report.meets_64_bit, "Goldilocks should meet 64-bit security");
-        assert!(!report.meets_128_bit, "Goldilocks should not meet 128-bit (field too small)");
-        
+        assert!(
+            report.meets_64_bit,
+            "Goldilocks should meet 64-bit security"
+        );
+        assert!(
+            !report.meets_128_bit,
+            "Goldilocks should not meet 128-bit (field too small)"
+        );
+
         // Soundness should exceed 128-bit
-        assert!(report.soundness_bits > 128.0, "Goldilocks soundness insufficient");
+        assert!(
+            report.soundness_bits > 128.0,
+            "Goldilocks soundness insufficient"
+        );
     }
-    
+
     #[test]
     fn test_bn254_security() {
         let params = SecurityParams::bn254();
         let report = params.generate_report();
-        
+
         println!("{}", report);
-        
+
         // BN254 should meet both 64-bit and 128-bit
         assert!(report.meets_64_bit);
         assert!(report.meets_128_bit, "BN254 should meet 128-bit security");
     }
-    
+
     #[test]
     fn test_comparison() {
         let configs = vec![
@@ -476,10 +542,10 @@ mod tests {
             SecurityParams::goldilocks(),
             SecurityParams::bn254(),
         ];
-        
+
         let comparison = compare_configs(&configs);
         println!("{}", comparison);
-        
+
         // Verify comparison table is non-empty
         assert!(comparison.len() > 100);
         assert!(comparison.contains("BabyBear"));

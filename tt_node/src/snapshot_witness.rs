@@ -3,9 +3,9 @@
 //! Snapshot witness verification module
 //! Provides compact witness format for weight verification
 
-use crate::snapshot_pro::{EpochSnapshot, MerkleProof};
 use crate::node_id::NodeId;
-use crate::rtt_pro::{Q, StakeQ};
+use crate::rtt_pro::{StakeQ, Q};
+use crate::snapshot_pro::{EpochSnapshot, MerkleProof};
 
 /// Compact weight witness format (V1)
 /// Contains minimal information needed to verify a node's weight in an epoch snapshot
@@ -33,13 +33,13 @@ impl SnapshotWitnessExt for EpochSnapshot {
         if wit.trust_q != self.trust_q_of(&wit.who) {
             return false;
         }
-        
+
         // Check leaf index matches
         match self.leaf_index_of(&wit.who) {
-            Some(idx) if idx == wit.leaf_index => {},
+            Some(idx) if idx == wit.leaf_index => {}
             _ => return false,
         }
-        
+
         // Verify Merkle proof
         let leaf = merkle_leaf_hash(&wit.who, wit.stake_q, wit.trust_q);
         let proof = MerkleProof {
@@ -119,9 +119,9 @@ mod tests {
         let a = nid(1);
         reg.insert(a, 100, true);
         ts.set(a, q_from_basis_points(5000));
-        
+
         let snap = EpochSnapshot::build(1, &reg, &ts, &tp, 0);
-        
+
         // Build witness from snapshot
         let proof = snap.build_proof(&a).unwrap();
         let wit = WeightWitnessV1 {
@@ -131,7 +131,7 @@ mod tests {
             leaf_index: proof.leaf_index,
             siblings: proof.siblings,
         };
-        
+
         assert!(snap.verify_witness(&wit));
     }
 
@@ -147,9 +147,9 @@ mod tests {
         let a = nid(1);
         reg.insert(a, 100, true);
         ts.set(a, ONE_Q);
-        
+
         let snap = EpochSnapshot::build(1, &reg, &ts, &tp, 0);
-        
+
         // Build witness with wrong stake_q
         let proof = snap.build_proof(&a).unwrap();
         let mut wit = WeightWitnessV1 {
@@ -159,9 +159,9 @@ mod tests {
             leaf_index: proof.leaf_index,
             siblings: proof.siblings,
         };
-        
+
         assert!(snap.verify_witness(&wit));
-        
+
         // Modify stake_q - should fail
         wit.stake_q = 0;
         assert!(!snap.verify_witness(&wit));

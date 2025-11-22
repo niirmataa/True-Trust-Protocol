@@ -161,6 +161,7 @@ Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md)
 - [Consensus Design](tt_node/CONSENSUS_DESIGN.md)
 - [Node Architecture](tt_node/NODE_ARCHITECTURE.md)
 - [Trust System Explained](tt_node/TRUST_EXPLAINED.md)
+- [Post-Quantum Status](PQ_STATUS.md)
 
 ## 🔗 Resources
 

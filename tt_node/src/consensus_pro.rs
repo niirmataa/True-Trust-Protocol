@@ -15,9 +15,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::node_id::NodeId;
-use crate::rtt_pro::{q_from_f64, q_to_f64, Q, TrustGraph, TrustScore, RTTConfig, ONE_Q};
 use crate::consensus_weights::{compute_final_weight_q, select_leader_deterministic, Weight};
+use crate::node_id::NodeId;
+use crate::rtt_pro::{q_from_f64, q_to_f64, RTTConfig, TrustGraph, TrustScore, ONE_Q, Q};
 
 /// Slot / consensus round identifier.
 pub type Slot = u64;
@@ -46,6 +46,15 @@ pub struct ValidatorState {
 
     /// Last computed RTT trust (T(v) ∈ [0,1] Q32.32).
     pub trust_q: TrustScore,
+}
+
+/// Summary statistics for monitoring and RPC exposure.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConsensusStats {
+    pub validator_count: usize,
+    pub total_stake_raw: StakeRaw,
+    pub avg_trust: f64,
+    pub avg_quality: f64,
 }
 
 /// Main PRO consensus object.
@@ -104,6 +113,9 @@ impl ConsensusPro {
         };
 
         self.validators.insert(id, state);
+
+        // Normalize stakes immediately so weights reflect the latest totals.
+        self.recompute_all_stake_q();
     }
 
     /// Removes validator (e.g. after unbonding / slashing).
@@ -111,6 +123,8 @@ impl ConsensusPro {
         if let Some(v) = self.validators.remove(id) {
             self.total_stake_raw = self.total_stake_raw.saturating_sub(v.stake_raw);
         }
+
+        self.recompute_all_stake_q();
     }
 
     /// Updates raw stake of validator.
@@ -122,6 +136,8 @@ impl ConsensusPro {
                 .saturating_add(new_stake_raw);
             v.stake_raw = new_stake_raw;
         }
+
+        self.recompute_all_stake_q();
     }
 
     /// Recomputes stake_q for all validators based on total_stake_raw.
@@ -194,6 +210,27 @@ impl ConsensusPro {
     /// Returns an iterator over all validator states.
     pub fn validators_iter(&self) -> impl Iterator<Item = &ValidatorState> {
         self.validators.values()
+    }
+
+    /// Monitoring-friendly snapshot for RPC and dashboards.
+    pub fn stats(&self) -> ConsensusStats {
+        let validator_count = self.validators.len();
+        let mut trust_sum = 0.0f64;
+        let mut quality_sum = 0.0f64;
+
+        for v in self.validators.values() {
+            trust_sum += q_to_f64(v.trust_q);
+            quality_sum += q_to_f64(v.quality_q);
+        }
+
+        let denom = validator_count.max(1) as f64;
+
+        ConsensusStats {
+            validator_count,
+            total_stake_raw: self.total_stake_raw,
+            avg_trust: trust_sum / denom,
+            avg_quality: quality_sum / denom,
+        }
     }
 
     /// Current validator weight in consensus (per deterministic integer function).

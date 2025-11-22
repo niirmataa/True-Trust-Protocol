@@ -1,10 +1,10 @@
 // state_priv.rs
 #![forbid(unsafe_code)]
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use crate::core::Hash32;
 use serde::{Deserialize, Serialize};
-use crate::core::Hash32; // <– ważne, spójny typ
+use std::collections::HashSet;
+use std::path::{Path, PathBuf}; // <– ważne, spójny typ
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct StatePriv {

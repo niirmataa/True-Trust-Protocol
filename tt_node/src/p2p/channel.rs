@@ -48,12 +48,7 @@ pub fn derive_session_keys(
     //                 custom = "TT-P2P-SESSION.v1",
     //                 data = transcript_hash,
     //                 out_len = 64)
-    let out = ck::kmac256_xof(
-        shared_secret,
-        b"TT-P2P-SESSION.v1",
-        transcript_hash,
-        64,
-    );
+    let out = ck::kmac256_xof(shared_secret, b"TT-P2P-SESSION.v1", transcript_hash, 64);
 
     let mut k_c2s = [0u8; 32];
     let mut k_s2c = [0u8; 32];
@@ -112,7 +107,10 @@ impl SecureChannel {
             .aead_send
             .encrypt(
                 &nonce,
-                Payload { msg: plaintext, aad },
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
             )
             .map_err(|e| anyhow!("encrypt failed: {e}"))?;
         Ok(ct)
@@ -131,7 +129,10 @@ impl SecureChannel {
             .aead_recv
             .decrypt(
                 &nonce,
-                Payload { msg: ciphertext, aad },
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
             )
             .map_err(|e| anyhow!("decrypt failed: {e}"))?;
         Ok(pt)

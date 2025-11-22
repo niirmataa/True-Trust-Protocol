@@ -1,76 +1,99 @@
-# Advanced Node - tx_stark.rs w Akcji!
+# Advanced Node - tt_wallet w Akcji!
 
 ## 🌟 Co to jest `advanced_node`?
 
-To jest **PRAWDZIWA** implementacja z:
+`advanced_node` to wersja węzła TRUE_TRUST, która **zawsze** korzysta z szyfrowanych
+portfeli `tt_wallet` oraz łączy STARK range proofs z szyfrowaniem Kyber-768.
+Klucze nigdy nie są przechowywane w plaintext, a saldo i nonce trzymamy w
+lekko wagowym pliku stanu (`*.state.json`).
 
 ### ✅ STARK Range Proofs
-- Dowodzi że wartość transakcji jest w poprawnym zakresie
+- Dowodzą, że kwota transakcji jest w poprawnym zakresie
 - Bez ujawniania dokładnej kwoty
-- Używa naszego `stark_full.rs`
+- Oparte o `tx_stark.rs`
 
 ### ✅ Kyber Encryption
-- Wartości transakcji są **zaszyfrowane** Kyber-768
+- Kwoty są szyfrowane Kyber-768 (KEM)
 - Tylko odbiorca może odszyfrować kwotę
-- Pełna poufność
+- Pełna poufność transakcji
 
-### ✅ Confidential Transactions
-- Struktury z `tx_stark.rs`
-- `TxOutputStark` - output z STARK proof + Kyber encryption
-- `TransactionStark` - pełna transakcja
+### ✅ tt_wallet Integration
+- Portfele szyfrowane (Argon2id/KMAC + AES-GCM-SIV/XChaCha20-Poly1305)
+- Obsługa pepper policy i Shamir Secret Sharing
+- Jedna ścieżka dla kluczy: tylko pliki `.dat` tworzone przez `tt_wallet`
 
 ### ✅ Secret Channels
 - Kyber KEM dla utworzenia shared secret
-- Szyfrowane kanały komunikacji
-- P2P encryption
+- Szyfrowane kanały komunikacji P2P
 
 ---
 
-## 📖 Użycie
+## ⚙️ Kompilacja (wymaga feature `wallet`)
 
-### 1. Utwórz Zaawansowany Portfel
-```powershell
-.\target\release\advanced_node.exe new-wallet \
-  --output alice_adv.json \
-  --name "Alice Advanced"
+```
+cargo build --release --bin advanced_node --features wallet
 ```
 
-**Zawiera:**
-- Falcon-512 (podpisy)
-- Kyber-768 (KEM, encryption)
+> `advanced_node` ma ustawione `required-features = ["wallet"]`, więc kompilacja
+> bez feature `wallet` zakończy się błędem.
 
-### 2. Zobacz Info
-```powershell
-.\target\release\advanced_node.exe info --wallet alice_adv.json
+---
+
+## 📖 Workflow z `tt_wallet`
+
+### 1. Utwórz szyfrowany portfel (`tt_wallet`)
+
+```bash
+# Nowy portfel (wprowadź hasło)
+cargo run --release --bin tt_wallet --features wallet -- wallet-init --file alice.dat
+cargo run --release --bin tt_wallet --features wallet -- wallet-init --file bob.dat
 ```
 
-### 3. Wyślij Poufną Transakcję
-```powershell
-# Najpierw utwórz portfel odbiorcy
-.\target\release\advanced_node.exe new-wallet -o bob_adv.json -n "Bob Advanced"
+### 2. Sprawdź adresy portfeli
 
-# Wyślij CONFIDENTIAL transaction
-.\target\release\advanced_node.exe send-confidential \
-  --from alice_adv.json \
-  --to-wallet bob_adv.json \
+```bash
+cargo run --release --bin tt_wallet --features wallet -- wallet-addr --file alice.dat
+cargo run --release --bin tt_wallet --features wallet -- wallet-addr --file bob.dat
+```
+
+### 3. Zainicjalizuj plik stanu (balance/nonce)
+
+Portfel jest szyfrowany w `*.dat`, natomiast saldo i nonce trzymamy w lekkim
+pliku stanu obok portfela:
+
+```bash
+./target/release/advanced_node new-wallet --output alice.dat --name "Alice"
+./target/release/advanced_node new-wallet --output bob.dat   --name "Bob"
+```
+
+**Wynik:** tworzy się `alice.dat.state.json` i `bob.dat.state.json` z domyślnym
+saldo (10_000 TT) i nonce=0.
+
+### 4. Wyślij poufną transakcję (STARK + Kyber, klucze z tt_wallet)
+
+```bash
+./target/release/advanced_node send-confidential \
+  --from alice.dat \
+  --to-wallet bob.dat \
   --amount 500 \
   --output tx_confidential.json
 ```
 
 **Co się dzieje:**
-1. ✅ Kwota (500) jest szyfrowana Kyber-768
-2. ✅ STARK proof dowodzi że 500 ∈ [0, 2^64)
-3. ✅ Commitment bind value + blinding
-4. ✅ Tylko Bob może odszyfrować
+1. `advanced_node` prosi o hasło do `alice.dat` i `bob.dat` (jeśli wymagane przez politykę portfela).
+2. Ładuje klucze Falcon/Kyber **bezpośrednio z szyfrowanych plików tt_wallet**.
+3. Tworzy `TransactionStark` z zaszyfrowaną kwotą (Kyber-768) i STARK range proof.
+4. Aktualizuje `alice.dat.state.json` (saldo - kwota - opłata, nonce +1).
 
-### 4. Odszyfruj Transakcję (jako odbiorca)
-```powershell
-.\target\release\advanced_node.exe decrypt-tx \
+### 5. Odszyfruj transakcję jako odbiorca
+
+```bash
+./target/release/advanced_node decrypt-tx \
   --tx tx_confidential.json \
-  --wallet bob_adv.json
+  --wallet bob.dat
 ```
 
-**Wynik:**
+**Wynik na konsoli:**
 ```
 Output 1:
   Recipient: a1b2c3d4...
@@ -79,134 +102,78 @@ Output 1:
   ✅ Commitment verified!
 ```
 
-### 5. Weryfikuj STARK Proofs (jako observer)
+### 6. Zweryfikuj STARK proofs (każdy obserwator)
+
+```bash
+./target/release/advanced_node verify-proofs --tx tx_confidential.json
+```
+
+### 7. Utwórz secret channel (Kyber KEM)
+
+```bash
+./target/release/advanced_node create-channel \
+  --wallet alice.dat \
+  --peer bob.dat \
+  --output channel_alice_bob.json
+```
+
+**Zapisuje:** ciphertext Kyber i metadane uczestników. Wspólny sekret można
+użyć do AES-256-GCM dla komunikacji P2P.
+
+---
+
+## 🔐 Co gdzie jest przechowywane?
+
+| Plik                        | Zawartość                            |
+|-----------------------------|--------------------------------------|
+| `*.dat` (tt_wallet)         | ZASZYFROWANE klucze Falcon + Kyber   |
+| `*.dat.state.json`          | Niezaszyfrowany stan (balance, nonce)|
+| `tx_confidential.json`      | Transakcja z wyjściami STARK + Kyber |
+| `channel_*.json`            | Ciphertext Kyber dla shared secret   |
+
+> Jeśli potrzebujesz również szyfrować stan, przechowuj `*.state.json` w bezpiecznym
+> miejscu lub użyj własnego szyfrowania plików.
+
+---
+
+## 🆚 Porównanie z `simple_node`
+
+| Feature | simple_node | advanced_node (tt_wallet) |
+|---------|-------------|----------------------------|
+| Przechowywanie kluczy | JSON plaintext | **Szyfrowane tt_wallet** |
+| Amount Visible | ✅ Tak | ❌ **Ukryte (Kyber)** |
+| STARK Proofs | ❌ Brak | ✅ **Tak** |
+| Secret Channels | ❌ Brak | ✅ **Tak** |
+| Zarządzanie saldo | W pamięci | Plik stanu obok portfela |
+
+---
+
+## 🛠️ Migracja ze starych portfeli JSON
+
+1. **Wyeksportuj** klucze ze starego portfela (ręcznie lub własnym skryptem).
+2. **Utwórz nowy** portfel `tt_wallet wallet-init --file nowy.dat`.
+3. **Zaimportuj** klucze do `tt_wallet` (lub użyj `wallet-rekey` jeśli dostępne).
+4. Zainicjalizuj plik stanu: `advanced_node new-wallet --output nowy.dat --name "Nowy"`.
+
+---
+
+## ✅ Szybkie komendy (Windows, release)
+
 ```powershell
-.\target\release\advanced_node.exe verify-proofs \
-  --tx tx_confidential.json
+# Kompilacja
+cargo build --release --bin advanced_node --features wallet
+
+# Info o portfelu (hasło wymagane)
+./target/release/advanced_node.exe info --wallet alice.dat
+
+# Wysyłka poufna
+./target/release/advanced_node.exe send-confidential `
+  --from alice.dat `
+  --to-wallet bob.dat `
+  --amount 250 `
+  --output tx.json
+
+# Odszyfrowanie
+./target/release/advanced_node.exe decrypt-tx --tx tx.json --wallet bob.dat
 ```
-
-**Każdy może zweryfikować że:**
-- ✅ Wartości są w poprawnym zakresie
-- ✅ STARK proofs są poprawne
-- ❌ ALE nie może zobaczyć dokładnych kwot!
-
-### 6. Utwórz Secret Channel
-```powershell
-.\target\release\advanced_node.exe create-channel \
-  --wallet alice_adv.json \
-  --peer bob_adv.json \
-  --output channel_alice_bob.bin
-```
-
-**Utworzy:**
-- Shared secret (Kyber KEM)
-- Zaszyfrowany kanał
-- Może być użyty do AES-256-GCM
-
----
-
-## 🔐 Bezpieczeństwo
-
-### Encryption Stack:
-```
-Kwota (500 TT)
-    ↓
-[STARK Proof] ← Dowodzi: value ∈ [0, 2^64)
-    ↓
-[Commitment] ← SHA3(value || blinding || recipient)
-    ↓
-[Kyber KEM] ← Encapsulate do recipient PK
-    ↓
-[XChaCha20-Poly1305] ← Szyfruj (value || blinding)
-    ↓
-[Encrypted Output] ← Tylko recipient może odszyfrować
-```
-
-### Properties:
-- ✅ **Confidentiality:** Kyber-768 (128-bit PQ)
-- ✅ **Integrity:** STARK proofs
-- ✅ **Authentication:** Falcon-512 signatures
-- ✅ **Range Validity:** STARK range proofs
-- ✅ **Zero Knowledge:** Nikt nie widzi kwoty (poza odbiorcą)
-
----
-
-## 🆚 Porównanie z simple_node
-
-| Feature | simple_node | advanced_node |
-|---------|-------------|---------------|
-| Transactions | Plain | **Confidential** |
-| Amount Visible | ✅ Yes | ❌ **Encrypted** |
-| STARK Proofs | ❌ No | ✅ **Yes** |
-| Kyber Encryption | ❌ No | ✅ **Yes** |
-| Secret Channels | ❌ No | ✅ **Yes** |
-| Complexity | Simple | Advanced |
-| Privacy | None | **Full** |
-
----
-
-## 🎯 Use Cases
-
-### simple_node
-- Testowanie podstaw
-- Nauka transakcji
-- Prosty transfer
-
-### advanced_node
-- **Confidential transactions**
-- Privacy-preserving transfers
-- Zero-knowledge proofs
-- Secure P2P channels
-- Production use
-
----
-
-## 🔬 Techniczne Detale
-
-### tx_stark.rs Components:
-
-```rust
-pub struct TxOutputStark {
-    pub value_commitment: Hash32,      // SHA3 commitment
-    pub stark_proof: Vec<u8>,          // Range proof
-    pub recipient: Hash32,             // Recipient address
-    pub encrypted_value: Vec<u8>,      // Kyber encrypted
-}
-```
-
-**Proces:**
-1. `value_commitment = SHA3(value || blinding || recipient)`
-2. `stark_proof = STARK_Prove(value ∈ [0, 2^64), commitment)`
-3. `(shared_secret, ct) = Kyber_Encaps(recipient_pk)`
-4. `encrypted_value = XChaCha20(value || blinding, key=KDF(shared_secret))`
-
-### Verification:
-```rust
-// Anyone can verify:
-assert!(STARK_Verify(stark_proof, commitment));
-
-// Only recipient can decrypt:
-(value, blinding) = Decrypt(encrypted_value, kyber_sk);
-assert_eq!(commitment, SHA3(value || blinding || recipient));
-```
-
----
-
-## 🚀 Następne Kroki
-
-**Status Bieżący:**
-- ✅ `tx_stark.rs` - Pełna implementacja
-- ✅ `advanced_node` - CLI gotowe
-- 🔄 P2P - Borrowing issue (do naprawy)
-
-**Gdy naprawimy P2P:**
-1. Live confidential tx broadcasting
-2. Secret channel P2P communication
-3. Multi-node privacy network
-4. Mixer service
-
----
-
-**TRUE_TRUST Advanced Node**
-*Privacy-Preserving | Post-Quantum | Zero-Knowledge*
 

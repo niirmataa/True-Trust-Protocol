@@ -39,22 +39,25 @@
 //! - ✅ Transcript integrity (SHA3-256 hash chain)
 //! - ✅ AEAD confidentiality + authenticity (XChaCha20-Poly1305)
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use chacha20poly1305::{
-    XChaCha20Poly1305, Key as XaKey, XNonce, 
-    aead::{Aead, KeyInit, Payload}
+    aead::{Aead, KeyInit, Payload},
+    Key as XaKey, XChaCha20Poly1305, XNonce,
 };
 
 use rand::RngCore;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use sha3::Sha3_256;
 
-use crate::falcon_sigs::{FalconPublicKey, FalconSecretKey, SignedNullifier, falcon_sign_nullifier, falcon_verify_nullifier};
-use pqcrypto_traits::sign::SignedMessage;
-use crate::kyber_kem::{KyberPublicKey, KyberSecretKey, kyber_encapsulate, kyber_decapsulate};
 use crate::crypto_kmac_consensus::kmac256_hash;
+use crate::falcon_sigs::{
+    falcon_sign_nullifier, falcon_verify_nullifier, FalconPublicKey, FalconSecretKey,
+    SignedNullifier,
+};
+use crate::kyber_kem::{kyber_decapsulate, kyber_encapsulate, KyberPublicKey, KyberSecretKey};
+use pqcrypto_traits::sign::SignedMessage;
 
 // =================== Constants ===================
 
@@ -80,7 +83,7 @@ impl SessionKey {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
-    
+
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
@@ -93,11 +96,11 @@ impl SessionKey {
 pub struct NodeIdentity {
     /// Node ID (derived from Falcon PK)
     pub node_id: NodeId,
-    
+
     /// Falcon512 signing key pair (long-term)
     pub falcon_pk: FalconPublicKey,
     pub falcon_sk: FalconSecretKey,
-    
+
     /// Kyber768 KEM key pair (ephemeral, rotated per session)
     pub kyber_pk: KyberPublicKey,
     pub kyber_sk: KyberSecretKey,
@@ -112,7 +115,7 @@ impl NodeIdentity {
         kyber_sk: KyberSecretKey,
     ) -> Self {
         use crate::falcon_sigs::falcon_pk_to_bytes;
-        
+
         // NodeId = SHA256(b"TT_NODE_ID.v1" || FalconPK)
         let mut h = Sha256::new();
         h.update(b"TT_NODE_ID.v1");
@@ -122,15 +125,15 @@ impl NodeIdentity {
         let mut node_id = [0u8; 32];
         node_id.copy_from_slice(&digest);
 
-        Self { 
-            node_id, 
-            falcon_pk, 
-            falcon_sk, 
-            kyber_pk, 
-            kyber_sk 
+        Self {
+            node_id,
+            falcon_pk,
+            falcon_sk,
+            kyber_pk,
+            kyber_sk,
         }
     }
-    
+
     /// Generate new ephemeral Kyber keys (for forward secrecy)
     pub fn rotate_kyber_keys(&mut self) {
         use crate::kyber_kem::kyber_keypair;
@@ -146,31 +149,31 @@ impl NodeIdentity {
 pub enum P2pCryptoError {
     #[error("Kyber KEM error: {0}")]
     KemError(String),
-    
+
     #[error("Falcon signature error: {0}")]
     SigError(String),
-    
+
     #[error("Signature error: {0}")]
     SignatureError(String),
-    
+
     #[error("AEAD encryption/decryption failed")]
     AeadError,
-    
+
     #[error("Protocol version mismatch: expected {expected}, got {got}")]
     VersionMismatch { expected: u16, got: u16 },
-    
+
     #[error("Invalid peer message: {0}")]
     InvalidMsg(String),
-    
+
     #[error("Nonce replay detected")]
     NonceReplay,
-    
+
     #[error("Session expired (message counter overflow)")]
     SessionExpired,
-    
+
     #[error("Transcript verification failed")]
     TranscriptError,
-    
+
     #[error("Serialization error: {0}")]
     SerializationError(String),
 }
@@ -182,19 +185,19 @@ pub enum P2pCryptoError {
 pub struct ClientHello {
     /// Protocol version
     pub version: u16,
-    
+
     /// Client's node ID
     pub node_id: NodeId,
-    
+
     /// Client's Falcon512 public key
     pub falcon_pk: Vec<u8>,
-    
+
     /// Client's ephemeral Kyber768 public key
     pub kyber_pk: Vec<u8>,
-    
+
     /// Client nonce (32 bytes random)
     pub nonce_client: [u8; 32],
-    
+
     /// Timestamp (Unix seconds, for replay protection)
     pub timestamp: u64,
 }
@@ -204,22 +207,22 @@ pub struct ClientHello {
 pub struct ServerHello {
     /// Protocol version
     pub version: u16,
-    
+
     /// Server's node ID
     pub node_id: NodeId,
-    
+
     /// Server's Falcon512 public key
     pub falcon_pk: Vec<u8>,
-    
+
     /// Kyber768 ciphertext (encapsulated shared secret)
     pub kyber_ct: Vec<u8>,
-    
+
     /// Server nonce (32 bytes random)
     pub nonce_server: [u8; 32],
-    
+
     /// Timestamp (Unix seconds)
     pub timestamp: u64,
-    
+
     /// Falcon signature over transcript (up to this point)
     pub sig: Vec<u8>,
 }
@@ -237,13 +240,13 @@ pub struct ClientFinished {
 pub struct SecureChannel {
     /// AEAD cipher (XChaCha20-Poly1305)
     aead: XChaCha20Poly1305,
-    
+
     /// Monotonic counter for sent messages (nonce)
     send_counter: u64,
-    
+
     /// Monotonic counter for received messages (nonce)
     recv_counter: u64,
-    
+
     /// Session creation timestamp (for expiry)
     created_at: std::time::Instant,
 }
@@ -252,9 +255,9 @@ impl SecureChannel {
     /// Create new secure channel from session key
     pub fn new(key: SessionKey) -> Self {
         let aead = XChaCha20Poly1305::new(XaKey::from_slice(&key.0));
-        Self { 
-            aead, 
-            send_counter: 0, 
+        Self {
+            aead,
+            send_counter: 0,
             recv_counter: 0,
             created_at: std::time::Instant::now(),
         }
@@ -262,8 +265,8 @@ impl SecureChannel {
 
     /// Check if session should be renegotiated
     pub fn should_renegotiate(&self) -> bool {
-        self.send_counter >= MAX_MESSAGES_PER_SESSION || 
-        self.recv_counter >= MAX_MESSAGES_PER_SESSION
+        self.send_counter >= MAX_MESSAGES_PER_SESSION
+            || self.recv_counter >= MAX_MESSAGES_PER_SESSION
     }
 
     /// Make XChaCha20 nonce from counter (192 bits = 24 bytes)
@@ -279,11 +282,14 @@ impl SecureChannel {
         if self.send_counter >= MAX_MESSAGES_PER_SESSION {
             return Err(P2pCryptoError::SessionExpired);
         }
-        
+
         let nonce = Self::make_nonce(self.send_counter);
         self.send_counter = self.send_counter.saturating_add(1);
-        
-        let payload = Payload { msg: plaintext, aad };
+
+        let payload = Payload {
+            msg: plaintext,
+            aad,
+        };
         self.aead
             .encrypt(&nonce, payload)
             .map_err(|_| P2pCryptoError::AeadError)
@@ -294,16 +300,19 @@ impl SecureChannel {
         if self.recv_counter >= MAX_MESSAGES_PER_SESSION {
             return Err(P2pCryptoError::SessionExpired);
         }
-        
+
         let nonce = Self::make_nonce(self.recv_counter);
         self.recv_counter = self.recv_counter.saturating_add(1);
-        
-        let payload = Payload { msg: ciphertext, aad };
+
+        let payload = Payload {
+            msg: ciphertext,
+            aad,
+        };
         self.aead
             .decrypt(&nonce, payload)
             .map_err(|_| P2pCryptoError::AeadError)
     }
-    
+
     /// Get session age
     pub fn age(&self) -> std::time::Duration {
         self.created_at.elapsed()
@@ -320,11 +329,7 @@ impl SecureChannel {
 ///     data = nonce_client || nonce_server,
 ///     custom = b"TT-P2P-SESSION.v1"
 /// )
-fn derive_session_key(
-    shared: &[u8], 
-    nonce_c: &[u8; 32], 
-    nonce_s: &[u8; 32]
-) -> SessionKey {
+fn derive_session_key(shared: &[u8], nonce_c: &[u8; 32], nonce_s: &[u8; 32]) -> SessionKey {
     let mut input = Vec::with_capacity(shared.len() + 64);
     input.extend_from_slice(shared);
     input.extend_from_slice(nonce_c);
@@ -332,7 +337,7 @@ fn derive_session_key(
 
     // KMAC256 z custom string dla domain separation
     let key_material = kmac256_hash(b"TT-P2P-SESSION.v1", &[&input]);
-    
+
     let mut key = [0u8; 32];
     key.copy_from_slice(&key_material[..32]);
     SessionKey(key)
@@ -352,14 +357,14 @@ impl TranscriptHasher {
         hasher.update(b"TT-P2P-HANDSHAKE.v1");
         Self { hasher }
     }
-    
+
     /// Update transcript with labeled data
     pub fn update(&mut self, label: &[u8], data: &[u8]) {
         self.hasher.update(label);
         self.hasher.update(&(data.len() as u32).to_le_bytes());
         self.hasher.update(data);
     }
-    
+
     /// Finalize and get transcript hash
     pub fn finalize(self) -> [u8; 32] {
         let digest = self.hasher.finalize();
@@ -367,7 +372,7 @@ impl TranscriptHasher {
         out.copy_from_slice(&digest);
         out
     }
-    
+
     /// Clone for parallel verification
     pub fn clone_state(&self) -> Self {
         Self {
@@ -385,7 +390,7 @@ pub fn build_client_hello(
 ) -> Result<(ClientHello, TranscriptHasher), P2pCryptoError> {
     let mut nonce_c = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce_c);
-    
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -393,7 +398,7 @@ pub fn build_client_hello(
 
     use crate::falcon_sigs::falcon_pk_to_bytes;
     use pqcrypto_traits::kem::PublicKey as KemPkTrait;
-    
+
     let ch = ClientHello {
         version,
         node_id: id.node_id,
@@ -405,8 +410,8 @@ pub fn build_client_hello(
 
     // Start transcript
     let mut transcript = TranscriptHasher::new();
-    let ch_bytes = bincode::serialize(&ch)
-        .map_err(|e| P2pCryptoError::SerializationError(e.to_string()))?;
+    let ch_bytes =
+        bincode::serialize(&ch).map_err(|e| P2pCryptoError::SerializationError(e.to_string()))?;
     transcript.update(b"CH", &ch_bytes);
 
     Ok((ch, transcript))
@@ -432,7 +437,7 @@ pub fn handle_client_hello(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     if now.saturating_sub(ch.timestamp) > MAX_NONCE_AGE_SECS {
         return Err(P2pCryptoError::NonceReplay);
     }
@@ -447,15 +452,15 @@ pub fn handle_client_hello(
 
     let mut nonce_s = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce_s);
-    
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
 
     use crate::falcon_sigs::falcon_pk_to_bytes;
-    use pqcrypto_traits::kem::{SharedSecret as KemSsTrait, Ciphertext as KemCtTrait};
-    
+    use pqcrypto_traits::kem::{Ciphertext as KemCtTrait, SharedSecret as KemSsTrait};
+
     // Derive session key
     let session_key = derive_session_key(ss.as_bytes(), &ch.nonce_client, &nonce_s);
 
@@ -513,14 +518,14 @@ pub fn handle_server_hello(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     if now.saturating_sub(sh.timestamp) > MAX_NONCE_AGE_SECS {
         return Err(P2pCryptoError::NonceReplay);
     }
 
     use crate::falcon_sigs::falcon_pk_from_bytes;
     use pqcrypto_traits::kem::Ciphertext as KemCtTrait;
-    
+
     // Reconstruct server's Falcon PK
     let server_falcon_pk = falcon_pk_from_bytes(&sh.falcon_pk)
         .map_err(|e| P2pCryptoError::SigError(format!("{:?}", e)))?;
@@ -530,7 +535,7 @@ pub fn handle_server_hello(
         .map_err(|e| P2pCryptoError::KemError(format!("{:?}", e)))?;
 
     use pqcrypto_traits::kem::SharedSecret as KemSsTrait;
-    
+
     // KEM decapsulation → shared secret
     let ss = kyber_decapsulate(&ct, &client_id.kyber_sk)
         .map_err(|e| P2pCryptoError::KemError(format!("{:?}", e)))?;
@@ -543,7 +548,7 @@ pub fn handle_server_hello(
         sig: Vec::new(),
         ..sh.clone()
     };
-    
+
     let sh_bytes = bincode::serialize(&sh_unsigned)
         .map_err(|e| P2pCryptoError::SerializationError(e.to_string()))?;
     transcript.update(b"SH", &sh_bytes);
@@ -553,11 +558,10 @@ pub fn handle_server_hello(
     let server_sig = crate::falcon_sigs::BlockSignature {
         signed_message_bytes: sh.sig.clone(),
     };
-    
+
     falcon_verify_nullifier(&transcript_hash, &server_sig, &server_falcon_pk)
         .map_err(|e| P2pCryptoError::SignatureError(e.to_string()))?;
-    Ok(())
-        .map_err(|e: anyhow::Error| P2pCryptoError::SignatureError(e.to_string()))?;
+    Ok(()).map_err(|e: anyhow::Error| P2pCryptoError::SignatureError(e.to_string()))?;
 
     // Update transcript with verified signature
     transcript.update(b"SIG_S", &sh.sig);
@@ -594,7 +598,7 @@ pub fn verify_client_finished(
     cf: &ClientFinished,
 ) -> Result<TranscriptHasher, P2pCryptoError> {
     use crate::falcon_sigs::falcon_pk_from_bytes;
-    
+
     let client_pk = falcon_pk_from_bytes(client_pk_bytes)
         .map_err(|e| P2pCryptoError::SigError(format!("{:?}", e)))?;
 
@@ -605,11 +609,10 @@ pub fn verify_client_finished(
     let sig = crate::falcon_sigs::BlockSignature {
         signed_message_bytes: cf.sig.clone(),
     };
-    
+
     falcon_verify_nullifier(&transcript_hash, &sig, &client_pk)
         .map_err(|e| P2pCryptoError::SignatureError(e.to_string()))?;
-    Ok(())
-        .map_err(|e: anyhow::Error| P2pCryptoError::SignatureError(e.to_string()))?;
+    Ok(()).map_err(|e: anyhow::Error| P2pCryptoError::SignatureError(e.to_string()))?;
 
     // Update transcript with verified signature
     transcript.update(b"SIG_C", &cf.sig);
@@ -643,16 +646,12 @@ mod tests {
             &ch,
             PROTOCOL_VERSION,
             transcript_c.clone_state(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // 3. Client verifies ServerHello
-        let (session_key_c, transcript_c) = handle_server_hello(
-            &client_id,
-            &ch,
-            &sh,
-            transcript_c,
-            PROTOCOL_VERSION,
-        ).unwrap();
+        let (session_key_c, transcript_c) =
+            handle_server_hello(&client_id, &ch, &sh, transcript_c, PROTOCOL_VERSION).unwrap();
 
         // 4. ClientFinished
         let (cf, _transcript_c) = build_client_finished(&client_id, transcript_c).unwrap();

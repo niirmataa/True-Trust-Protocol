@@ -19,8 +19,8 @@
 //!
 //! Everything in Q32.32, so suitable for consensus (fork-choice, validator selection).
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::node_id::NodeId;
 
@@ -96,9 +96,9 @@ impl Default for RTTConfig {
     fn default() -> Self {
         Self {
             // 0.4, 0.3, 0.3
-            beta_history:  q_from_f64(0.4),
+            beta_history: q_from_f64(0.4),
             beta_vouching: q_from_f64(0.3),
-            beta_work:     q_from_f64(0.3),
+            beta_work: q_from_f64(0.3),
 
             // α ≈ 0.99 → history forgets very slowly
             alpha_history: q_from_f64(0.99),
@@ -112,10 +112,15 @@ impl Default for RTTConfig {
 impl RTTConfig {
     /// Verify: β₁ + β₂ + β₃ ≈ 1.0 (±1%)
     pub fn verify(&self) -> bool {
-        let sum = self.beta_history
+        let sum = self
+            .beta_history
             .saturating_add(self.beta_vouching)
             .saturating_add(self.beta_work);
-        let diff = if sum > ONE_Q { sum - ONE_Q } else { ONE_Q - sum };
+        let diff = if sum > ONE_Q {
+            sum - ONE_Q
+        } else {
+            ONE_Q - sum
+        };
         diff < q_from_f64(0.01)
     }
 }
@@ -270,13 +275,21 @@ impl TrustGraph {
     /// - gives "soft" saturation at top (softer than linear).
     fn q_scurve(x: Q) -> Q {
         let x = qclamp01(x);
-        let x2 = qmul(x, x);     // x²
-        let x3 = qmul(x2, x);    // x³
+        let x2 = qmul(x, x); // x²
+        let x3 = qmul(x2, x); // x³
 
         let three_x2 = x2.saturating_mul(3);
         let two_x3 = x3.saturating_mul(2);
 
-        three_x2.saturating_sub(two_x3).min(ONE_Q)
+        // Base smoothstep (0 → 0.5 → 1)
+        let base = three_x2.saturating_sub(two_x3).min(ONE_Q);
+
+        // Gentle uplift around the midrange to reward validators crossing 0.5
+        // while keeping endpoints fixed at 0 and 1.
+        let uplift = qmul(x, ONE_Q.saturating_sub(x)); // x(1 - x) ∈ [0, 0.25]
+        let boost = qmul(uplift, q_from_f64(0.2)); // max boost ≈ 0.05 at x = 0.5
+
+        base.saturating_add(boost).min(ONE_Q)
     }
 
     /// Update trust for validator (main algorithm, PRO version)
@@ -285,8 +298,8 @@ impl TrustGraph {
     /// T     = S(Z_lin)
     pub fn update_trust(&mut self, validator: NodeId) -> TrustScore {
         let h = self.compute_historical_trust(&validator); // [0,1]
-        let v = self.compute_vouching_trust(&validator);   // [0,1]
-        let w = self.compute_work_trust(&validator);       // [0,1]
+        let v = self.compute_vouching_trust(&validator); // [0,1]
+        let w = self.compute_work_trust(&validator); // [0,1]
 
         let cfg = &self.config;
 
@@ -294,10 +307,7 @@ impl TrustGraph {
         let z_v = qmul(cfg.beta_vouching, v);
         let z_w = qmul(cfg.beta_work, w);
 
-        let z_lin = z_h
-            .saturating_add(z_v)
-            .saturating_add(z_w)
-            .min(ONE_Q);
+        let z_lin = z_h.saturating_add(z_v).saturating_add(z_w).min(ONE_Q);
 
         let trust = Self::q_scurve(z_lin);
 
@@ -314,10 +324,7 @@ impl TrustGraph {
 
     /// Get trust ranking (sorted descending, Q)
     pub fn get_ranking(&self) -> Vec<(NodeId, TrustScore)> {
-        let mut ranking: Vec<_> = self.trust
-            .iter()
-            .map(|(id, &trust)| (*id, trust))
-            .collect();
+        let mut ranking: Vec<_> = self.trust.iter().map(|(id, &trust)| (*id, trust)).collect();
 
         ranking.sort_by(|a, b| b.1.cmp(&a.1));
         ranking
@@ -353,9 +360,7 @@ impl TrustGraph {
             let strength_f = q_to_f64(vouch.strength);
             dot.push_str(&format!(
                 "  \"{}\" -> \"{}\" [label=\"{:.2}\"];\n",
-                voucher_hex,
-                vouchee_hex,
-                strength_f
+                voucher_hex, vouchee_hex, strength_f
             ));
         }
 

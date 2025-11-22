@@ -20,7 +20,7 @@
 //! `ConsensusPro`; ten moduł służy do LICZENIA quality/kar, a nie do
 //! leader-selection (tam jest Q32.32).
 
-use crate::rtt_pro::{Q, ONE_Q};
+use crate::rtt_pro::{ONE_Q, Q};
 
 /// Hard Trust / Quality Metrics (6 components)
 /// ⚠️ ONLY POST-QUANTUM! No Bulletproofs, no ECC!
@@ -29,25 +29,25 @@ pub struct HardTrustMetrics {
     // T1: Block Production
     pub blocks_produced: u64,
     pub target_blocks: u64,
-    
+
     // T2: Proof Generation (ONLY PQ!)
-    pub stark_proofs_count: u64,      // Winterfell STARK (PQ-safe)
+    pub stark_proofs_count: u64, // Winterfell STARK (PQ-safe)
     pub stark_proofs_valid: u64,
-    pub randomx_proofs_count: u64,    // RandomX PoW (PQ-safe)
+    pub randomx_proofs_count: u64, // RandomX PoW (PQ-safe)
     pub randomx_proofs_valid: u64,
-    
+
     // T3: Uptime
     pub uptime_slots: u64,
     pub eligible_slots: u64,
-    
+
     // T4: Stake Lock
     pub lock_days: u32,
-    pub stake_variance: f64,  // Consistency of stake (tu tylko do analizy)
-    
+    pub stake_variance: f64, // Consistency of stake (tu tylko do analizy)
+
     // T5: Fees
     pub fees_collected: f64,
     pub expected_fees: f64,
-    
+
     // T6: Network
     pub active_peers: u64,
     pub target_peers: u64,
@@ -58,12 +58,12 @@ pub struct HardTrustMetrics {
 /// Trust / quality component weights (α₁...α₆, suma ~ 1.0)
 #[derive(Clone, Debug)]
 pub struct TrustWeights {
-    pub blocks: f64,      // α₁ = 0.30
-    pub proofs: f64,      // α₂ = 0.25
-    pub uptime: f64,      // α₃ = 0.20
-    pub stake_lock: f64,  // α₄ = 0.10
-    pub fees: f64,        // α₅ = 0.10
-    pub network: f64,     // α₆ = 0.05
+    pub blocks: f64,     // α₁ = 0.30
+    pub proofs: f64,     // α₂ = 0.25
+    pub uptime: f64,     // α₃ = 0.20
+    pub stake_lock: f64, // α₄ = 0.10
+    pub fees: f64,       // α₅ = 0.10
+    pub network: f64,    // α₆ = 0.05
 }
 
 impl Default for TrustWeights {
@@ -83,15 +83,15 @@ impl Default for TrustWeights {
 /// ⚠️ ONLY POST-QUANTUM!
 #[derive(Clone, Debug)]
 pub struct ProofWeights {
-    pub stark: f64,     // w_stark = 0.7 (Winterfell range proofs)
-    pub randomx: f64,   // w_randomx = 0.3 (PoW quality)
+    pub stark: f64,   // w_stark = 0.7 (Winterfell range proofs)
+    pub randomx: f64, // w_randomx = 0.3 (PoW quality)
 }
 
 impl Default for ProofWeights {
     fn default() -> Self {
         Self {
-            stark: 0.7,     // STARK dominant (main proofs)
-            randomx: 0.3,   // RandomX PoW
+            stark: 0.7,   // STARK dominant (main proofs)
+            randomx: 0.3, // RandomX PoW
         }
     }
 }
@@ -104,13 +104,13 @@ impl Default for ProofWeights {
 pub fn stake_lock_multiplier(lock_days: u32) -> f64 {
     const K: f64 = 0.5;
     const T_BASE: f64 = 30.0;
-    
+
     1.0 + K * (1.0 + (lock_days as f64 / T_BASE)).ln()
 }
 
 /// Compute "hard" trust / quality z 6 komponentów (f64, off-chain / off-path)
 ///
-/// T_total = α₁·T_blocks + α₂·T_proofs + α₃·T_uptime + 
+/// T_total = α₁·T_blocks + α₂·T_proofs + α₃·T_uptime +
 ///           α₄·T_stake + α₅·T_fees + α₆·T_network
 ///
 /// Zwraca T ∈ [0.0, 1.0]
@@ -125,7 +125,7 @@ pub fn compute_hard_trust(
     } else {
         0.0
     };
-    
+
     // T2: Proof Generation (ONLY POST-QUANTUM!)
     let stark_ratio = if metrics.stark_proofs_count > 0 {
         metrics.stark_proofs_valid as f64 / metrics.stark_proofs_count as f64
@@ -137,50 +137,53 @@ pub fn compute_hard_trust(
     } else {
         0.0
     };
-    let t_proofs = proof_weights.stark * stark_ratio +
-                   proof_weights.randomx * randomx_ratio;
-    
+    let t_proofs = proof_weights.stark * stark_ratio + proof_weights.randomx * randomx_ratio;
+
     // T3: Uptime
     let t_uptime = if metrics.eligible_slots > 0 {
         metrics.uptime_slots as f64 / metrics.eligible_slots as f64
-    } else { 0.0 };
-    
+    } else {
+        0.0
+    };
+
     // T4: Stake Lock
     let lock_mult = stake_lock_multiplier(metrics.lock_days);
     let t_stake = (lock_mult / 4.0).min(1.0); // normalizacja ~4x
-    
+
     // T5: Fee Collection
     let t_fees = if metrics.expected_fees > 0.0 {
         (metrics.fees_collected / metrics.expected_fees).min(1.0)
-    } else { 0.0 };
-    
+    } else {
+        0.0
+    };
+
     // T6: Network
     let peer_score = if metrics.target_peers > 0 {
         metrics.active_peers as f64 / metrics.target_peers as f64
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     let propagation_score = if metrics.max_propagation_ms > 0 {
         1.0 - (metrics.avg_propagation_ms as f64 / metrics.max_propagation_ms as f64)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     let t_network = 0.5 * peer_score + 0.5 * propagation_score;
-    
-    let t_total = trust_weights.blocks * t_blocks +
-                  trust_weights.proofs * t_proofs +
-                  trust_weights.uptime * t_uptime +
-                  trust_weights.stake_lock * t_stake +
-                  trust_weights.fees * t_fees +
-                  trust_weights.network * t_network;
-    
+
+    let t_total = trust_weights.blocks * t_blocks
+        + trust_weights.proofs * t_proofs
+        + trust_weights.uptime * t_uptime
+        + trust_weights.stake_lock * t_stake
+        + trust_weights.fees * t_fees
+        + trust_weights.network * t_network;
+
     t_total.clamp(0.0, 1.0)
 }
 
 /// Aktualizacja trustu w Q32.32 z „miękkim” decajem.
 ///
 /// T(t+1) = β·T(t) + (1-β)·T_computed
-pub fn update_trust_with_decay(
-    current_trust_q: Q,
-    computed_trust: f64,
-    decay_beta: f64,
-) -> Q {
+pub fn update_trust_with_decay(current_trust_q: Q, computed_trust: f64, decay_beta: f64) -> Q {
     let current_f = (current_trust_q as f64) / (ONE_Q as f64);
     let new_f = decay_beta * current_f + (1.0 - decay_beta) * computed_trust;
     let new_q = (new_f * (ONE_Q as f64)) as u64;
@@ -191,9 +194,9 @@ pub fn update_trust_with_decay(
 ///
 /// W_final = T^p_trust × (1+R)^p_randomx × S^p_stake
 pub fn compute_final_weight_f64(
-    trust: f64,         // T ∈ [0,1]
-    randomx_score: f64, // R = solved/expected
-    stake_fraction: f64,// S ∈ [0,1]
+    trust: f64,          // T ∈ [0,1]
+    randomx_score: f64,  // R = solved/expected
+    stake_fraction: f64, // S ∈ [0,1]
     powers: &PowerParams,
 ) -> f64 {
     let w_trust = trust.powf(powers.trust);
@@ -205,9 +208,9 @@ pub fn compute_final_weight_f64(
 /// Parametry potęg dla powyższego wzoru (tylko analitycznie)
 #[derive(Clone, Debug)]
 pub struct PowerParams {
-    pub trust: f64,      // p_trust = 1.0
-    pub randomx: f64,    // p_randomx = 0.5
-    pub stake: f64,      // p_stake = 0.8
+    pub trust: f64,   // p_trust = 1.0
+    pub randomx: f64, // p_randomx = 0.5
+    pub stake: f64,   // p_stake = 0.8
 }
 
 impl Default for PowerParams {
@@ -241,11 +244,7 @@ pub fn compute_min_stake(total_validators: u64, base_stake: u64) -> u64 {
 /// Kwota slasha (f64 na wejściu, finalnie u64).
 ///
 /// slash = base_penalty × severity × stake
-pub fn compute_slash_amount(
-    stake: u64,
-    severity: u32,
-    base_penalty: f64,
-) -> u64 {
+pub fn compute_slash_amount(stake: u64, severity: u32, base_penalty: f64) -> u64 {
     let slash_ratio = base_penalty * (severity as f64);
     ((stake as f64) * slash_ratio.min(1.0)) as u64
 }
@@ -283,7 +282,7 @@ mod tests {
             avg_propagation_ms: 50,
             max_propagation_ms: 1000,
         };
-        
+
         let trust_weights = TrustWeights::default();
         let proof_weights = ProofWeights::default();
         let trust = compute_hard_trust(&metrics, &trust_weights, &proof_weights);

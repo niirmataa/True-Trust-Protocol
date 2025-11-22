@@ -4,10 +4,10 @@ use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
 
+use crate::consensus_pro::{ConsensusPro, Slot};
+use crate::consensus_weights::{compute_final_weight_q, Weight};
 use crate::node_id::NodeId;
 use crate::rtt_pro::Q;
-use crate::consensus_weights::{compute_final_weight_q, Weight};
-use crate::consensus_pro::{ConsensusPro, Slot};
 
 /// Merkle proof dla pojedynczego walidatora.
 #[derive(Clone, Debug)]

@@ -16,10 +16,10 @@ use crate::rtt_pro::Q;
 pub type Weight = u128;
 
 /// Weight constants (can be pulled into config if desired).
-/// Example here: trust has most weight, then last quality, then stake.
+/// Example here: trust has most weight, then last quality/stake equally.
 pub const W_TRUST: u128 = 4;
 pub const W_QUALITY: u128 = 2;
-pub const W_STAKE: u128 = 1;
+pub const W_STAKE: u128 = 2;
 
 /// Simple function normalizing Q32.32 to Weight.
 #[inline]
@@ -34,18 +34,12 @@ fn q_to_weight(x: Q) -> u128 {
 /// - `stake_q`   – stake normalized to [0,1] (Q32.32)
 ///
 /// Returns value comparable between validators (Weight).
-pub fn compute_final_weight_q(
-    trust_q: Q,
-    quality_q: Q,
-    stake_q: Q,
-) -> Weight {
+pub fn compute_final_weight_q(trust_q: Q, quality_q: Q, stake_q: Q) -> Weight {
     let t = q_to_weight(trust_q);
     let q = q_to_weight(quality_q);
     let s = q_to_weight(stake_q);
 
-    W_TRUST * t
-        + W_QUALITY * q
-        + W_STAKE * s
+    W_TRUST * t + W_QUALITY * q + W_STAKE * s
 }
 
 /// Deterministic leader selection.
@@ -71,15 +65,17 @@ pub fn select_leader_deterministic(
             h.update(&w.to_be_bytes());
             let digest = h.finalize();
 
-            // Interpret hash as u128 (lowest 16B) – HIGHER value is better.
+            // Interpret hash as u128 (lowest 16B) – used only as tie-breaker.
             let mut score_bytes = [0u8; 16];
             score_bytes.copy_from_slice(&digest[16..32]);
             let score = u128::from_be_bytes(score_bytes);
 
-            (score, *id)
+            // Primary key: weight (higher = better). Secondary: hashed score for
+            // deterministic tie-breaking between equal weights.
+            (w, score, *id)
         })
-        .max_by_key(|(score, _)| *score)
-        .map(|(_, id)| id)
+        .max_by(|(w1, s1, _), (w2, s2, _)| (w1, s1).cmp(&(w2, s2)))
+        .map(|(_, _, id)| id)
 }
 
 #[cfg(test)]
@@ -111,10 +107,7 @@ mod tests {
         let q_mid = q_from_f64(0.5);
         let s_mid = q_from_f64(0.4);
 
-        let vals = vec![
-            (v1, t_high, q_mid, s_mid),
-            (v2, t_low, q_mid, s_mid),
-        ];
+        let vals = vec![(v1, t_high, q_mid, s_mid), (v2, t_low, q_mid, s_mid)];
 
         let leader1 = select_leader_deterministic(beacon, &vals).unwrap();
         let leader2 = select_leader_deterministic(beacon, &vals).unwrap();

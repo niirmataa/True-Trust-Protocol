@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Broadcast STARK transactions through P2P network with Kyber encryption
 //!
 //! This module provides functions to:
