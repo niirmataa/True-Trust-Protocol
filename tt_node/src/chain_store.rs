@@ -86,4 +86,18 @@ impl ChainStore {
 
         AcceptResult { is_new, is_head }
     }
+
+    /// Get current chain height (height of head block)
+    pub fn get_height(&self) -> u64 {
+        self.head
+            .as_ref()
+            .and_then(|hid| self.height.get(hid))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Get best block hash (current head)
+    pub fn get_best_block_hash(&self) -> Hash32 {
+        self.head.unwrap_or([0u8; 32])
+    }
 }
