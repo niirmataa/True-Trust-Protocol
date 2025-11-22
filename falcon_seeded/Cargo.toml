@@ -9,6 +9,7 @@ links = "falcon_seeded"
 
 [dependencies]
 libc = "0.2"
+zeroize = { version = "1.7", features = ["derive"] }
 
 [build-dependencies]
 cc = "1.0"

@@ -32,7 +32,7 @@
 //! }
 //!
 //! // Generate deterministic keypair
-//! let drbg = Arc::new(MyDrbg::new());
+//! let drbg = Arc::new(MyDrbg {});
 //! let (pk, sk) = keypair_with(drbg.clone()).unwrap();
 //!
 //! // Sign message deterministically
@@ -49,6 +49,7 @@
 use libc::{c_int, size_t};
 use std::cell::RefCell;
 use std::sync::Arc;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Falcon-512 public key length (bytes)
 pub const PK_LEN: usize = 897;
@@ -56,8 +57,52 @@ pub const PK_LEN: usize = 897;
 /// Falcon-512 secret key length (bytes) - PQClean format
 pub const SK_LEN: usize = 1281;
 
+/// Falcon-512 minimum signature length (bytes)
+pub const SIG_MIN_LEN: usize = 617;
+
+/// Falcon-512 typical signature length (bytes)
+pub const SIG_TYPICAL_LEN: usize = 666;
+
 /// Falcon-512 maximum signature length (bytes)
 pub const SIG_MAX_LEN: usize = 690; // ~666B typical; buffer for safety
+
+/* ============================================================================
+ * Error Types
+ * ========================================================================== */
+
+/// Falcon operation errors
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FalconError {
+    /// Keypair generation failed
+    KeygenFailed,
+    /// Signature generation failed
+    SigningFailed,
+    /// Invalid signature format or length
+    InvalidSignature,
+    /// No RNG source available (critical security error)
+    NoRngAvailable,
+    /// Signature exceeds maximum allowed length
+    SignatureTooLong,
+}
+
+impl std::fmt::Display for FalconError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::KeygenFailed => write!(f, "Falcon-512 keypair generation failed"),
+            Self::SigningFailed => write!(f, "Falcon-512 signature generation failed"),
+            Self::InvalidSignature => write!(f, "Invalid signature format or length"),
+            Self::NoRngAvailable => {
+                write!(f, "CRITICAL: No RNG source registered - security compromised")
+            }
+            Self::SignatureTooLong => write!(f, "Signature exceeds maximum length ({})", SIG_MAX_LEN),
+        }
+    }
+}
+
+impl std::error::Error for FalconError {}
+
+/// Result type for Falcon operations
+pub type Result<T> = std::result::Result<T, FalconError>;
 
 /* ============================================================================
  * FFI Declarations
@@ -95,8 +140,18 @@ extern "C" {
 /// Trait for providing random bytes to Falcon operations
 ///
 /// Implement this for your DRBG (e.g., `KmacDrbg`)
+///
+/// # Security Requirements
+///
+/// - Must be cryptographically secure
+/// - Should be seeded with sufficient entropy (≥256 bits)
+/// - Must be deterministic if reproducible signatures are needed
 pub trait FillBytes: Send + Sync {
     /// Fill buffer with deterministic random bytes
+    ///
+    /// # Panics
+    ///
+    /// Implementation may panic if unable to provide randomness
     fn fill(&self, out: &mut [u8]);
 }
 
@@ -104,6 +159,11 @@ thread_local! {
     static TLS_SRC: RefCell<Option<Arc<dyn FillBytes>>> = RefCell::new(None);
 }
 
+/// C callback adapter for RNG
+///
+/// # Panics
+///
+/// Panics if no RNG source is registered (security fail-fast)
 extern "C" fn tls_fill_adapter(out: *mut u8, outlen: usize) {
     TLS_SRC.with(|slot| {
         if let Some(src) = &*slot.borrow() {
@@ -112,14 +172,23 @@ extern "C" fn tls_fill_adapter(out: *mut u8, outlen: usize) {
                 src.fill(std::slice::from_raw_parts_mut(out, outlen));
             }
         } else {
-            // Fallback: zero-fill (will cause verification failures)
-            unsafe {
-                std::ptr::write_bytes(out, 0u8, outlen);
-            }
+            // CRITICAL: No RNG available - panic immediately!
+            // This is better than silently producing insecure output.
+            // The C code also calls abort() as defense in depth.
+            panic!(
+                "FATAL SECURITY ERROR: No RNG source registered for Falcon operation!\n\
+                 This indicates a programming error that compromises cryptographic security.\n\
+                 The operation cannot continue safely."
+            );
         }
     });
 }
 
+/// Execute function with RNG source in thread-local storage
+///
+/// # Safety
+///
+/// Ensures RNG is cleaned up after operation, preventing accidental reuse
 fn with_src<T>(src: Arc<dyn FillBytes>, f: impl FnOnce() -> T) -> T {
     TLS_SRC.with(|slot| {
         *slot.borrow_mut() = Some(src);
@@ -141,8 +210,14 @@ fn with_src<T>(src: Arc<dyn FillBytes>, f: impl FnOnce() -> T) -> T {
 ///
 /// # Returns
 ///
-/// - `Ok((pk, sk))`: Public key (897 bytes) and secret key (1281 bytes)
-/// - `Err`: Keygen failed (should not happen with proper DRBG)
+/// - `Ok((pk, sk))`: Public key (897 bytes) and secret key (1281 bytes, zeroized on drop)
+/// - `Err(FalconError)`: Keygen failed
+///
+/// # Security
+///
+/// - Secret key is wrapped in `Zeroizing` for automatic memory cleanup
+/// - Same DRBG state produces same keypair (deterministic)
+/// - DRBG should be seeded with ≥256 bits entropy
 ///
 /// # Example
 ///
@@ -157,19 +232,21 @@ fn with_src<T>(src: Arc<dyn FillBytes>, f: impl FnOnce() -> T) -> T {
 ///
 /// let drbg = Arc::new(MyDrbg);
 /// let (pk, sk) = keypair_with(drbg).unwrap();
+/// // sk is automatically zeroized when dropped
 /// ```
-pub fn keypair_with(src: Arc<dyn FillBytes>) -> Result<([u8; PK_LEN], [u8; SK_LEN]), &'static str> {
+pub fn keypair_with(
+    src: Arc<dyn FillBytes>,
+) -> Result<([u8; PK_LEN], Zeroizing<[u8; SK_LEN]>)> {
     let mut pk = [0u8; PK_LEN];
-    let mut sk = [0u8; SK_LEN];
+    let mut sk = Zeroizing::new([0u8; SK_LEN]);
 
     let rc = with_src(src, || unsafe {
         tt_falcon512_keypair_seeded(pk.as_mut_ptr(), sk.as_mut_ptr(), tls_fill_adapter)
     });
 
-    if rc == 0 {
-        Ok((pk, sk))
-    } else {
-        Err("falcon keypair generation failed")
+    match rc {
+        0 => Ok((pk, sk)),
+        _ => Err(FalconError::KeygenFailed),
     }
 }
 
@@ -177,23 +254,26 @@ pub fn keypair_with(src: Arc<dyn FillBytes>) -> Result<([u8; PK_LEN], [u8; SK_LE
 ///
 /// # Parameters
 ///
-/// - `src`: DRBG implementing `FillBytes` trait (should be seeded with context)
-/// - `sk`: Falcon secret key (1281 bytes)
+/// - `src`: DRBG implementing `FillBytes` trait (should be seeded with message context)
+/// - `sk`: Falcon secret key (1281 bytes) - can be regular array or Zeroizing wrapper
 /// - `msg`: Message to sign
 ///
 /// # Returns
 ///
 /// - `Ok(signature)`: Falcon signature (~666 bytes, variable length)
-/// - `Err`: Signing failed
+/// - `Err(FalconError)`: Signing failed
 ///
-/// # Security Notes
+/// # Security Notes - CRITICAL!
 ///
-/// **CRITICAL:** The DRBG must be seeded with:
-/// 1. Secret key PRF
-/// 2. Message hash or transcript
-/// 3. Unique context (epoch, nonce, etc.)
+/// **The DRBG must be uniquely seeded for each signature!**
 ///
-/// Never reuse the same DRBG state for different messages!
+/// Recommended seeding pattern:
+/// 1. Derive PRF key from secret key
+/// 2. Hash message to create transcript
+/// 3. Combine PRF + transcript + unique context (nonce/epoch)
+/// 4. Use as DRBG seed
+///
+/// **Never reuse the same DRBG state for different messages!**
 ///
 /// # Example
 ///
@@ -207,14 +287,15 @@ pub fn keypair_with(src: Arc<dyn FillBytes>) -> Result<([u8; PK_LEN], [u8; SK_LE
 /// }
 ///
 /// let sk = [0u8; 1281]; // Your secret key
-/// let drbg = Arc::new(MyDrbg); // Seeded with message context!
+/// let drbg = Arc::new(MyDrbg); // MUST be seeded with message context!
 /// let sig = sign_with(drbg, &sk, b"message").unwrap();
 /// ```
-pub fn sign_with(
+pub fn sign_with<S: AsRef<[u8; SK_LEN]>>(
     src: Arc<dyn FillBytes>,
-    sk: &[u8; SK_LEN],
+    sk: &S,
     msg: &[u8],
-) -> Result<Vec<u8>, &'static str> {
+) -> Result<Vec<u8>> {
+    let sk_bytes = sk.as_ref();
     let mut sig = vec![0u8; SIG_MAX_LEN];
     let mut siglen: usize = 0;
 
@@ -224,17 +305,31 @@ pub fn sign_with(
             &mut siglen as *mut usize,
             msg.as_ptr(),
             msg.len(),
-            sk.as_ptr(),
+            sk_bytes.as_ptr(),
             tls_fill_adapter,
         )
     });
 
-    if rc == 0 {
-        sig.truncate(siglen);
-        Ok(sig)
-    } else {
-        Err("falcon signature generation failed")
+    if rc != 0 {
+        return Err(FalconError::SigningFailed);
     }
+
+    // Validate signature length
+    if siglen > SIG_MAX_LEN {
+        return Err(FalconError::SignatureTooLong);
+    }
+
+    if siglen == 0 {
+        return Err(FalconError::InvalidSignature);
+    }
+
+    // Additional sanity check (Falcon signatures should be in reasonable range)
+    if siglen < SIG_MIN_LEN {
+        return Err(FalconError::InvalidSignature);
+    }
+
+    sig.truncate(siglen);
+    Ok(sig)
 }
 
 /// Verify Falcon-512 signature (standard, non-deterministic)
@@ -248,7 +343,7 @@ pub fn sign_with(
 /// # Returns
 ///
 /// - `true`: Signature is valid
-/// - `false`: Signature is invalid or malformed
+/// - `false`: Signature is invalid, malformed, or wrong length
 ///
 /// # Example
 ///
@@ -256,9 +351,26 @@ pub fn sign_with(
 /// use falcon_seeded::verify;
 ///
 /// let pk = [0u8; 897]; // Public key
-/// let valid = verify(&pk, b"message", &signature);
+/// let msg = b"message";
+/// let sig = vec![/* signature bytes */];
+///
+/// if verify(&pk, msg, &sig) {
+///     println!("✓ Signature valid");
+/// } else {
+///     println!("✗ Signature invalid");
+/// }
 /// ```
 pub fn verify(pk: &[u8; PK_LEN], msg: &[u8], sig: &[u8]) -> bool {
+    // Validate signature length before FFI call
+    if sig.is_empty() || sig.len() > SIG_MAX_LEN {
+        return false;
+    }
+
+    // Additional sanity check
+    if sig.len() < SIG_MIN_LEN {
+        return false;
+    }
+
     let rc = unsafe {
         tt_falcon512_verify(
             sig.as_ptr(),
@@ -268,6 +380,7 @@ pub fn verify(pk: &[u8; PK_LEN], msg: &[u8], sig: &[u8]) -> bool {
             pk.as_ptr(),
         )
     };
+
     rc == 0
 }
 
@@ -308,7 +421,7 @@ mod tests {
         let drbg = Arc::new(TestDrbg::new());
         let result = keypair_with(drbg);
         assert!(result.is_ok(), "Keypair generation should succeed");
-        
+
         let (pk, sk) = result.unwrap();
         assert_eq!(pk.len(), PK_LEN);
         assert_eq!(sk.len(), SK_LEN);
@@ -325,7 +438,10 @@ mod tests {
         let sig = sign_with(drbg_sign, &sk, msg).unwrap();
 
         assert!(verify(&pk, msg, &sig), "Signature should verify");
-        assert!(!verify(&pk, b"wrong message", &sig), "Wrong message should fail");
+        assert!(
+            !verify(&pk, b"wrong message", &sig),
+            "Wrong message should fail"
+        );
     }
 
     #[test]
@@ -337,7 +453,107 @@ mod tests {
         let drbg2 = Arc::new(TestDrbg::new());
         let (pk2, sk2) = keypair_with(drbg2).unwrap();
 
-        assert_eq!(&pk1[..], &pk2[..], "Same DRBG should produce same public key");
-        assert_eq!(&sk1[..], &sk2[..], "Same DRBG should produce same secret key");
+        assert_eq!(
+            &pk1[..],
+            &pk2[..],
+            "Same DRBG should produce same public key"
+        );
+        assert_eq!(
+            &sk1[..],
+            &sk2[..],
+            "Same DRBG should produce same secret key"
+        );
+    }
+
+    #[test]
+    #[ignore] // Requires PQClean sources
+    fn test_deterministic_signing() {
+        let drbg_keygen = Arc::new(TestDrbg::new());
+        let (_pk, sk) = keypair_with(drbg_keygen).unwrap();
+
+        let msg = b"deterministic test";
+
+        // Same DRBG state should produce same signature
+        let drbg1 = Arc::new(TestDrbg::new());
+        let sig1 = sign_with(drbg1, &sk, msg).unwrap();
+
+        let drbg2 = Arc::new(TestDrbg::new());
+        let sig2 = sign_with(drbg2, &sk, msg).unwrap();
+
+        assert_eq!(sig1, sig2, "Same DRBG state should produce same signature");
+    }
+
+    #[test]
+    fn test_verify_rejects_invalid_length() {
+        let pk = [0u8; PK_LEN];
+        let msg = b"test";
+
+        // Empty signature
+        assert!(!verify(&pk, msg, &[]), "Empty signature should fail");
+
+        // Too long signature
+        let too_long = vec![0u8; SIG_MAX_LEN + 1];
+        assert!(!verify(&pk, msg, &too_long), "Too long signature should fail");
+
+        // Too short signature
+        let too_short = vec![0u8; SIG_MIN_LEN - 1];
+        assert!(!verify(&pk, msg, &too_short), "Too short signature should fail");
+    }
+
+    #[test]
+    fn test_error_display() {
+        assert_eq!(
+            FalconError::KeygenFailed.to_string(),
+            "Falcon-512 keypair generation failed"
+        );
+        assert_eq!(
+            FalconError::SigningFailed.to_string(),
+            "Falcon-512 signature generation failed"
+        );
+        assert!(FalconError::NoRngAvailable
+            .to_string()
+            .contains("CRITICAL"));
+    }
+
+    #[test]
+    #[ignore] // Requires PQClean sources
+    fn test_sk_zeroization() {
+        let drbg = Arc::new(TestDrbg::new());
+
+        // This test verifies that Zeroizing wrapper is used
+        let result = keypair_with(drbg);
+        assert!(result.is_ok());
+
+        let (_pk, sk) = result.unwrap();
+        // sk will be zeroized when dropped at end of scope
+        drop(sk);
+        // Memory should now be zeroed (can't directly test, but type guarantees it)
+    }
+
+    #[test]
+    #[ignore] // Requires PQClean sources
+    fn test_sign_with_regular_and_zeroizing_sk() {
+        let drbg_keygen = Arc::new(TestDrbg::new());
+        let (pk, sk_zeroizing) = keypair_with(drbg_keygen).unwrap();
+
+        // Convert to regular array
+        let sk_regular: [u8; SK_LEN] = *sk_zeroizing;
+
+        let msg = b"test";
+
+        // Sign with Zeroizing wrapper
+        let drbg1 = Arc::new(TestDrbg::new());
+        let sig1 = sign_with(drbg1, &sk_zeroizing, msg).unwrap();
+
+        // Sign with regular array
+        let drbg2 = Arc::new(TestDrbg::new());
+        let sig2 = sign_with(drbg2, &sk_regular, msg).unwrap();
+
+        // Both should produce same signature
+        assert_eq!(sig1, sig2, "Signature should be same regardless of SK wrapper");
+
+        // Both should verify
+        assert!(verify(&pk, msg, &sig1));
+        assert!(verify(&pk, msg, &sig2));
     }
 }

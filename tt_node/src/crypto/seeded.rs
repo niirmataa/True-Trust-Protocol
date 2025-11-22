@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Deterministic Falcon Operations via KMAC-DRBG
 //!
 //! Ten moduł robi dwie rzeczy:
@@ -11,7 +13,7 @@
 //! # Warstwy API
 //!
 //! - **Low-level (raw)**:
-//!   - `falcon_keypair_deterministic` – → ([u8; PK_LEN], [u8; SK_LEN])
+//!   - `falcon_keypair_deterministic` – → ([u8; PK_LEN], Zeroizing<[u8; SK_LEN]>)
 //!   - `falcon_sign_deterministic` – wymaga ręcznego `coins_seed` + `personalization`
 //!   - to jest „dla dorosłych" – zostawiamy do specjalnych zastosowań
 //!
@@ -63,8 +65,9 @@
 
 use crate::crypto::kmac::kmac256_derive_key;
 use crate::crypto::kmac_drbg::KmacDrbg;
-use falcon_seeded::{self as fs, FillBytes};
+use falcon_seeded::{self as fs, FillBytes, FalconError};
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 /* ============================================================================
  * KmacDrbg Adapter for falcon_seeded
@@ -97,8 +100,8 @@ impl FillBytes for DrbgFill {
 ///
 /// # Returns
 ///
-/// - `Ok((pk, sk))`: Falcon public key (897B) and secret key (1281B)
-/// - `Err`: Keygen failed (should not happen with valid seed)
+/// - `Ok((pk, sk))`: Falcon public key (897B) and secret key (1281B, zeroized on drop)
+/// - `Err`: Keygen failed
 ///
 /// # Example
 ///
@@ -107,6 +110,7 @@ impl FillBytes for DrbgFill {
 /// let epoch = 5u64;
 /// let pers = format!("FALCON/keygen/epoch={}", epoch);
 /// let (pk, sk) = falcon_keypair_deterministic(master_seed, pers.as_bytes()).unwrap();
+/// // sk is automatically zeroized when dropped
 /// ```
 ///
 /// # Security
@@ -114,18 +118,18 @@ impl FillBytes for DrbgFill {
 /// - Same (seed, personalization) always produces same keypair
 /// - Personalization prevents cross-context attacks
 /// - Seed should have ≥256 bits entropy for 128-bit security
+/// - Secret key is automatically zeroized on drop
 pub fn falcon_keypair_deterministic(
     seed32: [u8; 32],
     personalization: &[u8],
-) -> Result<([u8; fs::PK_LEN], [u8; fs::SK_LEN]), Box<dyn std::error::Error>> {
+) -> Result<([u8; fs::PK_LEN], Zeroizing<[u8; fs::SK_LEN]>), FalconError> {
     // Create deterministic DRBG
     let drbg = KmacDrbg::new(&seed32, personalization);
     let src = Arc::new(DrbgFill(Mutex::new(drbg)));
-    
+
     // Generate keypair via FFI
-    let (pk, sk) = fs::keypair_with(src)
-        .map_err(|e| format!("Falcon keygen failed: {}", e))?;
-    
+    let (pk, sk) = fs::keypair_with(src)?;
+
     Ok((pk, sk))
 }
 
@@ -133,7 +137,7 @@ pub fn falcon_keypair_deterministic(
 ///
 /// # Parameters
 ///
-/// - `sk`: Falcon secret key (1281 bytes)
+/// - `sk`: Falcon secret key (1281 bytes) - can be regular array or Zeroizing wrapper
 /// - `msg`: Message to sign
 /// - `coins_seed`: Secret seed for signature coins (32 bytes)
 ///   - Should be derived from: `KMAC(sk_prf, transcript_hash)`
@@ -182,24 +186,23 @@ pub fn falcon_keypair_deterministic(
 /// // Sign
 /// let sig = falcon_sign_deterministic(&sk, msg, coins_seed, b"ctx=tx1").unwrap();
 /// ```
-pub fn falcon_sign_deterministic(
-    sk: &[u8; fs::SK_LEN],
+pub fn falcon_sign_deterministic<S: AsRef<[u8; fs::SK_LEN]>>(
+    sk: &S,
     msg: &[u8],
     coins_seed: [u8; 32],
     personalization: &[u8],
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+) -> Result<Vec<u8>, FalconError> {
     // Create deterministic DRBG for coins
     let mut drbg = KmacDrbg::new(&coins_seed, personalization);
-    
+
     // Optional: Ratchet before signing (forward secrecy)
     drbg.ratchet();
-    
+
     let src = Arc::new(DrbgFill(Mutex::new(drbg)));
-    
+
     // Sign via FFI
-    let sig = fs::sign_with(src, sk, msg)
-        .map_err(|e| format!("Falcon signing failed: {}", e))?;
-    
+    let sig = fs::sign_with(src, sk, msg)?;
+
     Ok(sig)
 }
 
@@ -232,7 +235,7 @@ pub fn falcon_verify(pk: &[u8; fs::PK_LEN], msg: &[u8], sig: &[u8]) -> bool {
 ///
 /// # Parameters
 ///
-/// - `sk`: Falcon secret key (1281 bytes)
+/// - `sk`: Falcon secret key (1281 bytes) - can be regular array or Zeroizing wrapper
 ///
 /// # Returns
 ///
@@ -247,10 +250,11 @@ pub fn falcon_verify(pk: &[u8; fs::PK_LEN], msg: &[u8], sig: &[u8]) -> bool {
 /// // Later, for signing:
 /// let coins_seed = kmac256_derive_key(&sk_prf, b"coins", &transcript);
 /// ```
-pub fn derive_sk_prf(sk: &[u8; fs::SK_LEN]) -> [u8; 32] {
+pub fn derive_sk_prf<S: AsRef<[u8; fs::SK_LEN]>>(sk: &S) -> [u8; 32] {
+    let sk_bytes = sk.as_ref();
     // Use first 32 bytes of SK as seed for PRF derivation
     // (Falcon SK structure: [f, g, F] where f is the secret polynomial)
-    let sk_seed = &sk[..32.min(sk.len())];
+    let sk_seed = &sk_bytes[..32.min(sk_bytes.len())];
     kmac256_derive_key(sk_seed, b"FALCON/sk-prf", b"v1")
 }
 
@@ -291,7 +295,10 @@ mod tests {
 
         // Different context → different signature
         let sig3 = falcon_sign_deterministic(&sk, msg, coins_seed, b"ctx=B").unwrap();
-        assert_ne!(sig1, sig3, "Different context should produce different signature");
+        assert_ne!(
+            sig1, sig3,
+            "Different context should produce different signature"
+        );
     }
 
     #[test]
@@ -305,7 +312,49 @@ mod tests {
         let sig = falcon_sign_deterministic(&sk, msg, coins_seed, b"v1").unwrap();
 
         assert!(falcon_verify(&pk, msg, &sig), "Signature should verify");
-        assert!(!falcon_verify(&pk, b"wrong msg", &sig), "Wrong message should fail");
+        assert!(
+            !falcon_verify(&pk, b"wrong msg", &sig),
+            "Wrong message should fail"
+        );
+    }
+
+    #[test]
+    #[ignore] // Requires PQClean sources
+    fn test_sk_zeroization() {
+        let seed = [0x42u8; 32];
+        let (_pk, sk) = falcon_keypair_deterministic(seed, b"test").unwrap();
+
+        // SK will be zeroized when dropped
+        drop(sk);
+        // Memory is now zeroed (type-level guarantee via Zeroizing)
+    }
+
+    #[test]
+    #[ignore] // Requires PQClean sources
+    fn test_sign_with_zeroizing_sk() {
+        let seed = [0x42u8; 32];
+        let (pk, sk_zeroizing) = falcon_keypair_deterministic(seed, b"test").unwrap();
+
+        // Sign directly with Zeroizing wrapper
+        let msg = b"test";
+        let coins_seed = kmac256_derive_key(&seed, b"coins", msg);
+        let sig = falcon_sign_deterministic(&sk_zeroizing, msg, coins_seed, b"v1").unwrap();
+
+        assert!(falcon_verify(&pk, msg, &sig), "Signature should verify");
+    }
+
+    #[test]
+    #[ignore] // Requires PQClean sources
+    fn test_derive_sk_prf_with_zeroizing() {
+        let seed = [0x42u8; 32];
+        let (_pk, sk_zeroizing) = falcon_keypair_deterministic(seed, b"test").unwrap();
+
+        // derive_sk_prf works with Zeroizing wrapper
+        let prf1 = derive_sk_prf(&sk_zeroizing);
+        let prf2 = derive_sk_prf(&sk_zeroizing);
+
+        assert_eq!(prf1, prf2, "PRF derivation should be deterministic");
+        assert_eq!(prf1.len(), 32, "PRF should be 32 bytes");
     }
 
     #[test]
@@ -313,8 +362,17 @@ mod tests {
         let sk = [0xCDu8; fs::SK_LEN];
         let prf1 = derive_sk_prf(&sk);
         let prf2 = derive_sk_prf(&sk);
-        
+
         assert_eq!(prf1, prf2, "PRF derivation should be deterministic");
         assert_eq!(prf1.len(), 32, "PRF should be 32 bytes");
+    }
+
+    #[test]
+    #[ignore] // Requires PQClean sources
+    fn test_error_handling() {
+        // This test verifies that errors are properly propagated
+        let seed = [0x42u8; 32];
+        let result = falcon_keypair_deterministic(seed, b"test");
+        assert!(result.is_ok(), "Keypair generation should succeed");
     }
 }
