@@ -48,6 +48,7 @@ pqcrypto-traits = "0.3"
 
 # Async / networking
 tokio = { version = "1.38", features = ["full"] }
+hyper = { version = "0.14", features = ["full"] }
 
 # CLI and logging
 clap = { version = "4.5", features = ["derive"] }
