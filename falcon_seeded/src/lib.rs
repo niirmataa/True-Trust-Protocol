@@ -48,7 +48,7 @@
 
 use libc::{c_int, size_t};
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Falcon-512 public key length (bytes)
@@ -159,6 +159,10 @@ thread_local! {
     static TLS_SRC: RefCell<Option<Arc<dyn FillBytes>>> = RefCell::new(None);
 }
 
+// Global mutex for thread-safe RNG operations
+// Prevents race conditions when multiple threads call keypair_with/sign_with simultaneously
+static RNG_LOCK: Mutex<()> = Mutex::new(());
+
 /// C callback adapter for RNG
 ///
 /// # Panics
@@ -186,16 +190,28 @@ extern "C" fn tls_fill_adapter(out: *mut u8, outlen: usize) {
 
 /// Execute function with RNG source in thread-local storage
 ///
+/// # Thread Safety
+///
+/// Uses a global mutex to prevent race conditions when multiple threads
+/// attempt to use the RNG simultaneously. This ensures that:
+/// - Only one thread can set/use the TLS_SRC at a time
+/// - The C callback never sees conflicting RNG sources
+/// - No data races occur in the global `g_fill_bytes` pointer
+///
 /// # Safety
 ///
 /// Ensures RNG is cleaned up after operation, preventing accidental reuse
 fn with_src<T>(src: Arc<dyn FillBytes>, f: impl FnOnce() -> T) -> T {
+    // Acquire mutex to ensure exclusive access to RNG operations
+    let _guard = RNG_LOCK.lock().unwrap();
+
     TLS_SRC.with(|slot| {
         *slot.borrow_mut() = Some(src);
         let result = f();
         *slot.borrow_mut() = None;
         result
     })
+    // Mutex is released when _guard drops
 }
 
 /* ============================================================================
@@ -447,21 +463,25 @@ mod tests {
     #[test]
     #[ignore] // Requires PQClean sources
     fn test_deterministic_keypair() {
+        use subtle::ConstantTimeEq;
+
         let drbg1 = Arc::new(TestDrbg::new());
         let (pk1, sk1) = keypair_with(drbg1).unwrap();
 
         let drbg2 = Arc::new(TestDrbg::new());
         let (pk2, sk2) = keypair_with(drbg2).unwrap();
 
+        // Public keys can be compared normally
         assert_eq!(
             &pk1[..],
             &pk2[..],
             "Same DRBG should produce same public key"
         );
-        assert_eq!(
-            &sk1[..],
-            &sk2[..],
-            "Same DRBG should produce same secret key"
+
+        // Secret keys should be compared in constant-time to prevent timing attacks
+        assert!(
+            bool::from(sk1.as_ref().ct_eq(sk2.as_ref())),
+            "Same DRBG should produce same secret key (constant-time comparison)"
         );
     }
 
@@ -555,5 +575,36 @@ mod tests {
         // Both should verify
         assert!(verify(&pk, msg, &sig1));
         assert!(verify(&pk, msg, &sig2));
+    }
+
+    #[test]
+    #[ignore] // Requires PQClean sources
+    fn test_thread_safety_concurrent_operations() {
+        use std::thread;
+
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                thread::spawn(move || {
+                    // Each thread generates its own keypair
+                    let drbg = Arc::new(TestDrbg::new());
+                    let (pk, sk) = keypair_with(drbg).unwrap();
+
+                    // Each thread signs a message
+                    let msg = format!("thread {} message", i);
+                    let drbg_sign = Arc::new(TestDrbg::new());
+                    let sig = sign_with(drbg_sign, &sk, msg.as_bytes()).unwrap();
+
+                    // Each thread verifies
+                    assert!(verify(&pk, msg.as_bytes(), &sig));
+
+                    (pk, sig)
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            assert!(handle.join().is_ok(), "Thread should complete successfully");
+        }
     }
 }

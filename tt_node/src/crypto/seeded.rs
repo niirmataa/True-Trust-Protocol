@@ -269,14 +269,22 @@ mod tests {
     #[test]
     #[ignore] // Requires PQClean sources in falcon_seeded
     fn test_deterministic_keygen() {
+        use subtle::ConstantTimeEq;
+
         let seed = [0x11u8; 32];
         let pers = b"test/epoch=1/identity";
 
         let (pk1, sk1) = falcon_keypair_deterministic(seed, pers).unwrap();
         let (pk2, sk2) = falcon_keypair_deterministic(seed, pers).unwrap();
 
+        // Public keys can be compared normally
         assert_eq!(&pk1[..], &pk2[..], "Public keys should match");
-        assert_eq!(&sk1[..], &sk2[..], "Secret keys should match");
+
+        // Secret keys should be compared in constant-time
+        assert!(
+            bool::from(sk1.as_ref().ct_eq(sk2.as_ref())),
+            "Secret keys should match (constant-time comparison)"
+        );
     }
 
     #[test]
