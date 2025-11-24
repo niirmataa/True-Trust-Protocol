@@ -12,6 +12,7 @@ pub mod kmac_drbg;
 pub mod seeded;
 pub mod kyber_kem;
 pub mod poseidon_hash_cpu;
+#[cfg(feature = "winterfell_v2")]
 pub mod zk_range_poseidon;
 pub mod randomx_pow;
 

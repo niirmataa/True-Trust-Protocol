@@ -17,7 +17,6 @@
 //! pokazać end-to-end: wallet → STARK tx → podpis Falcon → RPC → node.
 
 // zewnętrzne
-use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -28,6 +27,9 @@ use crate::consensus_pro::ConsensusPro;
 use crate::core::{shake256_bytes, Hash32};
 use crate::node_id::NodeId;
 use crate::tx_stark::SignedStarkTx;
+use anyhow::{Result, anyhow, ensure};
+use crate::falcon_sigs::{falcon_verify_block, falcon_pk_from_bytes};
+
 
 /// Bardzo prosty mempool – trzyma surowe bajty transakcji.
 /// W demo wystarczy, żeby pokazać przepływ end-to-end.
@@ -164,26 +166,6 @@ impl NodeCore {
         Ok(id)
     }
 
-    /// Wrzucenie podpisanej transakcji STARK (Falcon + STARK).
-    ///
-    /// - weryfikuje podpis Falcon nad całą strukturą,
-    /// - weryfikuje dowody STARK (range, sum itp. – wg `TransactionStark::verify_all_proofs`),
-    /// - po sukcesie wrzuca zserializowanego `SignedStarkTx` do mempoola
-    ///   i zwraca `tx_id` (Hash32) z `TransactionStark::id()`.
-    pub async fn submit_signed_stark_tx(&self, stx: &SignedStarkTx) -> Result<Hash32> {
-        // 1) Falcon + STARK
-        stx.verify_all()?;
-
-        // 2) Id transakcji (deterministyczny hash z `TransactionStark`)
-        let id = stx.tx.id();
-
-        // 3) Zapisujemy całą strukturę w mempoolu w formie binarnej
-        let bytes = bincode::serialize(stx)?;
-        self.tx_pool.write().await.add(bytes)?;
-
-        Ok(id)
-    }
-
     /// Stub do pokazywania API `GetBalance` w RPC.
     ///
     /// Prawdziwy prywatny bilans z not STARK/Kyber wymaga skanowania
@@ -196,5 +178,39 @@ impl NodeCore {
     /// Na razie zwraca 0, żeby API się kompilowało i było demonstracyjne.
     pub async fn get_balance(&self, _id: &NodeId) -> u128 {
         0
+    }
+
+    /// Submit fully signed STARK transaction:
+    /// - verify STARK proofs,
+    /// - verify Falcon signature on tx_id,
+    /// - wrzucić do mempoolu jak zwykłą transakcję.
+    pub async fn submit_signed_stark_tx(&self, stx: &SignedStarkTx) -> Result<Hash32> {
+        // Decode inner tx
+        let tx = stx
+            .parse_tx()
+            .map_err(|e| anyhow!("Failed to decode TransactionStark: {e}"))?;
+
+        let tx_id = tx.id();
+
+        // Verify all STARK proofs
+        let (valid, total) = tx.verify_all_proofs();
+        ensure!(
+            valid == total,
+            "Invalid STARK proofs: {valid}/{total}"
+        );
+
+        // Falcon PK from bytes
+        let signer_pk = falcon_pk_from_bytes(&stx.signer_pk_bytes)
+            .map_err(|e| anyhow!("Invalid signer Falcon pk: {e}"))?;
+
+        // Verify Falcon signature on tx_id
+        falcon_verify_block(&tx_id, &stx.signature, &signer_pk)?;
+
+        // Submit inner tx bytes to mempool / chain_store
+        let tx_bytes = tx.to_bytes();
+        let stored_id = self.submit_transaction(&tx_bytes).await?;
+
+        // Dla przejrzystości zwracamy tx_id z TransactionStark
+        Ok(stored_id)
     }
 }

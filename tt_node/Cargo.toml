@@ -15,10 +15,6 @@ name = "tt_wallet"
 path = "src/bin/wallet.rs"
 required-features = ["wallet"]
 
-[[bin]]
-name = "advanced_node"
-path = "src/bin/advanced_node.rs"
-required-features = ["wallet"]
 
 [[example]]
 name = "mining_demo"
@@ -69,7 +65,7 @@ chrono = { version = "0.4", features = ["serde"] }
 merlin = "3.0"
 
 # Winterfell STARK
-winterfell = { version = "0.13", default-features = false, features = ["std"], optional = true }
+winterfell = { version = "0.13", default-features = false, features = ["std", "concurrent"], optional = true }
 falcon_seeded = { path = "../falcon_seeded", optional = true }
 
 # Wallet-specific dependencies
@@ -83,7 +79,7 @@ constant_time_eq = "0.1"
 lazy_static = "1.4"
 
 [features]
-default = []
+default = ["winterfell_v2"]
 networking = []               # <-- NOWE
 winterfell_v2 = ["winterfell"]
 seeded_falcon = ["falcon_seeded"]

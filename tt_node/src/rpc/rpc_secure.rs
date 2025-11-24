@@ -324,11 +324,15 @@ impl SecureRpcServer {
         // background tasks
         {
             let s = Arc::clone(&server);
-            tokio::spawn(async move { s.cleanup_sessions_task().await });
+            tokio::spawn(async move {
+                cleanup_sessions_task(s).await;
+            });
         }
         {
             let s = Arc::clone(&server);
-            tokio::spawn(async move { s.key_rotation_task().await });
+            tokio::spawn(async move {
+                key_rotation_task(s).await;
+            });
         }
 
         loop {
@@ -701,7 +705,7 @@ impl SecureRpcServer {
             },
         }
     }
-
+}
 /* ============================================================================ */
 /* Client                                                                       */
 /* ============================================================================ */
@@ -943,4 +947,30 @@ pub fn create_secure_rpc_identity() -> Result<NodeIdentity> {
     let (falcon_pk, falcon_sk) = crate::falcon_sigs::falcon_keypair();
     let (kyber_pk, kyber_sk) = crate::kyber_kem::kyber_keypair();
     Ok(NodeIdentity::from_keys(falcon_pk, falcon_sk, kyber_pk, kyber_sk))
+}
+
+// ============================================================================
+// Background tasks (session cleanup, key rotation)
+// ============================================================================
+
+async fn cleanup_sessions_task(server: Arc<SecureRpcServer>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        let mut sessions = server.sessions.write().await;
+        let now = Instant::now();
+        sessions.retain(|_, st| now.duration_since(st.last_activity) < SESSION_TIMEOUT);
+    }
+}
+
+async fn key_rotation_task(server: Arc<SecureRpcServer>) {
+    let mut interval = tokio::time::interval(KEY_ROTATION_INTERVAL);
+    loop {
+        interval.tick().await;
+        let mut last = server.last_key_rotation.write().await;
+        if last.elapsed() >= KEY_ROTATION_INTERVAL {
+            // TODO: key rotation logic (rotate Falcon/Kyber identity, announce over P2P, etc.)
+            *last = Instant::now();
+        }
+    }
 }

@@ -18,15 +18,16 @@ use rand::RngCore;
 
 use winterfell::Proof as StarkProof;
 use winterfell::math::StarkField;
+use crate::falcon_sigs::BlockSignature;
 
 use crate::core::Hash32;
 use crate::crypto::poseidon_hash_cpu::poseidon_hash_cpu;
 use crate::crypto::zk_range_poseidon::{
+    Witness as RangeWitness,
+    PublicInputs as RangePubInputs,
     default_proof_options,
     prove_range_with_poseidon,
     verify_range_with_poseidon,
-    PublicInputs as RangePublicInputs,
-    Witness as RangeWitness,
 };
 
 /// Kyber768 ciphertext size (1088 bytes)
@@ -248,6 +249,33 @@ impl TransactionStark {
             .map_err(|e| format!("TX deserialization failed: {}", e))
     }
 }
+
+/// Signed Stark transaction:
+/// - `tx_bytes`        – zserializowany `TransactionStark` (bincode),
+/// - `signer_pk_bytes` – Falcon-512 public key w postaci bytes,
+/// - `signature`       – Falcon signature na tx_id (hash32).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SignedStarkTx {
+    /// Raw bincode-encoded TransactionStark
+    pub tx_bytes: Vec<u8>,
+    /// Falcon-512 public key of the signer (serialized bytes)
+    pub signer_pk_bytes: Vec<u8>,
+    /// Falcon signature over tx_id (BlockSignature = SignedNullifier)
+    pub signature: BlockSignature,
+}
+
+impl SignedStarkTx {
+    /// Parse inner TransactionStark from bytes
+    pub fn parse_tx(&self) -> std::result::Result<TransactionStark, String> {
+        TransactionStark::from_bytes(&self.tx_bytes)
+    }
+
+    /// Convenience: compute tx_id (hash32) from inner tx
+    pub fn tx_id(&self) -> std::result::Result<crate::core::Hash32, String> {
+        self.parse_tx().map(|tx| tx.id())
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

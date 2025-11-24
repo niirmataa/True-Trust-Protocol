@@ -1,6 +1,5 @@
-// tt_node/src/crypto/zk_range_poseidon.rs
 #![forbid(unsafe_code)]
-#![cfg(feature = "winterfell_v2")]
+// BEZ: #![cfg(feature = "winterfell_v2")]
 
 // Composite Range Proof + Poseidon commitment (0 <= v < 2^k, link + hash)
 
@@ -421,11 +420,11 @@ impl Prover for CompositeProver {
             trace.get(COL_POSEIDON_STATE_START + POSEIDON_VALUE_LANE, last);
         let commitment = commitment_elem.as_int() as u64;
 
-       PublicInputs {
-           value_commitment: commitment,
-           recipient: [0u8; 32],
-           num_bits: self.num_bits as u32,
-       }
+        PublicInputs {
+            value_commitment: commitment,
+            recipient: [0u8; 32],
+            num_bits: self.num_bits as u32,
+        }
     }
 
     fn options(&self) -> &ProofOptions {
