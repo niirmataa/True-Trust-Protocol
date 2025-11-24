@@ -67,3 +67,8 @@ __pycache__/
 *$py.class
 venv/
 .venv/
+
+# Rust build output
+/target/
+/tt_node/target/
+
