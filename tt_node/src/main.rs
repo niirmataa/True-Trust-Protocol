@@ -208,13 +208,24 @@ fn run_validator(
             println!("🔑 Generating new validator keys...");
             falcon_sigs::falcon_keypair()
         };
-        
+
         let node_id = node_id::node_id_from_falcon_pk(&falcon_pk);
         println!("📍 Node ID: {}", hex::encode(&node_id));
-        
+
+        // Generate Kyber keys for P2P
+        let (kyber_pk, kyber_sk) = kyber_kem::kyber_keypair();
+
+        // Create node identity for P2P
+        let identity = p2p::secure::NodeIdentity::from_keys(
+            falcon_pk.clone(),
+            falcon_sk.clone(),
+            kyber_pk,
+            kyber_sk,
+        );
+
         // Start P2P network
         println!("🌐 Starting P2P network on port {}...", p2p_port);
-        let p2p = Arc::new(p2p::P2PNetwork::new(p2p_port, node_id).await?);
+        let p2p = Arc::new(p2p::P2PNetwork::new(p2p_port, node_id, identity).await?);
         
         // Register as validator in consensus
         let mut consensus = consensus_pro::ConsensusPro::new_default();
@@ -250,13 +261,24 @@ fn run_full_node(data_dir: PathBuf, p2p_port: u16, rpc_port: u16) -> Result<()> 
         let node = node_core::NodeCore::new(data_dir, false)?;
         
         // Generate node identity
-        let (falcon_pk, _) = falcon_sigs::falcon_keypair();
+        let (falcon_pk, falcon_sk) = falcon_sigs::falcon_keypair();
         let node_id = node_id::node_id_from_falcon_pk(&falcon_pk);
         println!("📍 Node ID: {}", hex::encode(&node_id));
-        
+
+        // Generate Kyber keys for P2P
+        let (kyber_pk, kyber_sk) = kyber_kem::kyber_keypair();
+
+        // Create node identity for P2P
+        let identity = p2p::secure::NodeIdentity::from_keys(
+            falcon_pk,
+            falcon_sk,
+            kyber_pk,
+            kyber_sk,
+        );
+
         // Start P2P network
         println!("🌐 Starting P2P network on port {}...", p2p_port);
-        let p2p = Arc::new(p2p::P2PNetwork::new(p2p_port, node_id).await?);
+        let p2p = Arc::new(p2p::P2PNetwork::new(p2p_port, node_id, identity).await?);
         
         println!("✅ Full node started successfully!");
         println!("⏳ Running... Press Ctrl+C to stop");

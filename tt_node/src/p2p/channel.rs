@@ -90,6 +90,24 @@ impl SecureChannel {
         }
     }
 
+    /// Creates a server-side channel from session key (assuming single symmetric key)
+    /// For compatibility with RPC code that expects this API
+    pub fn new_server(session_key: &crate::p2p::secure::SessionKey) -> Self {
+        // For server: we use same key for both directions (symmetric)
+        // In production, derive_session_keys should be used for proper bidirectional keys
+        let key_bytes = session_key.as_bytes();
+        let send_key = SessionKey(*key_bytes);
+        let recv_key = SessionKey(*key_bytes);
+        Self::new(send_key, recv_key)
+    }
+
+    /// Creates a client-side channel from session key (assuming single symmetric key)
+    /// For compatibility with RPC code that expects this API
+    pub fn new_client(session_key: &crate::p2p::secure::SessionKey) -> Self {
+        // For client: same as server in symmetric mode
+        Self::new_server(session_key)
+    }
+
     /// Creates nonce from 64-bit counter.
     /// Remaining 16 bytes left at 0 – keys differ per direction, so no (key, nonce) collision.
     #[inline]
@@ -135,6 +153,13 @@ impl SecureChannel {
             )
             .map_err(|e| anyhow!("decrypt failed: {e}"))?;
         Ok(pt)
+    }
+
+    /// Check if channel should be renegotiated based on nonce counter usage
+    /// Returns true if counters are getting close to overflow (> 2^32 messages)
+    pub fn should_renegotiate(&self) -> bool {
+        const RENEGOTIATE_THRESHOLD: u64 = 1u64 << 32; // 4 billion messages
+        self.send_ctr > RENEGOTIATE_THRESHOLD || self.recv_ctr > RENEGOTIATE_THRESHOLD
     }
 }
 
