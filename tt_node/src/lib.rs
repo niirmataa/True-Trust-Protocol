@@ -27,6 +27,7 @@ pub mod pqc_verification;
 pub mod p2p;
 pub mod node_core;
 pub mod rpc;
+pub mod keystore;
 
 #[cfg(feature = "wallet")]
 pub mod wallet;
