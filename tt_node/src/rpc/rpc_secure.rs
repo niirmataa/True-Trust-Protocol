@@ -703,28 +703,93 @@ impl SecureRpcServer {
         }
     }
 
-    /// Background task: Rotate node identity keys periodically
+    /// Background task: Rotate node identity keys using unpredictable algorithm
+    ///
+    /// Rotation triggers are based on:
+    /// - Entropy from chain state (block hashes)
+    /// - Number of connections/requests (usage-based)
+    /// - Randomized intervals (prevents timing attacks)
+    /// - Session count thresholds
     async fn key_rotation_task(&self) {
+        use sha3::{Digest, Sha3_256};
+
+        // Base interval: 12-36 hours (randomized)
+        let base_interval_secs = {
+            use rand::Rng;
+            rand::thread_rng().gen_range(12 * 3600..36 * 3600)
+        };
+
+        let mut accumulated_entropy = 0u64;
+        const ENTROPY_THRESHOLD: u64 = 1_000_000; // Rotate after 1M requests worth of entropy
+
         loop {
-            tokio::time::sleep(KEY_ROTATION_INTERVAL).await;
+            // Check every hour with jitter
+            let check_interval = {
+                use rand::Rng;
+                Duration::from_secs(rand::thread_rng().gen_range(3000..4200)) // ~50-70 min
+            };
+            tokio::time::sleep(check_interval).await;
 
-            // Check if rotation is needed
             let last_rotation = *self.last_key_rotation.read().await;
-            if last_rotation.elapsed() < KEY_ROTATION_INTERVAL {
-                continue;
-            }
+            let time_elapsed = last_rotation.elapsed().as_secs();
 
-            // Regenerate identity keys
-            let mut identity = self.identity.write().await;
-            match create_secure_rpc_identity() {
-                Ok(new_identity) => {
-                    *identity = new_identity;
-                    drop(identity);
-                    *self.last_key_rotation.write().await = Instant::now();
-                    println!("🔄 Node identity keys rotated");
-                }
-                Err(e) => {
-                    eprintln!("⚠️  Key rotation failed: {}", e);
+            // Collect entropy from various sources
+            let metrics = self.metrics.read().await;
+            let sessions = self.sessions.read().await;
+
+            // Hash-based entropy from chain state
+            let chain_height = self.node.get_chain_height().await;
+            let best_hash = self.node.get_best_block_hash().await;
+
+            let mut hasher = Sha3_256::new();
+            hasher.update(&chain_height.to_le_bytes());
+            hasher.update(&best_hash);
+            hasher.update(&metrics.total_requests.to_le_bytes());
+            hasher.update(&metrics.total_connections.to_le_bytes());
+            hasher.update(&sessions.len().to_le_bytes());
+            hasher.update(&time_elapsed.to_le_bytes());
+            let entropy_hash = hasher.finalize();
+
+            // Convert hash to entropy score
+            let entropy_score = u64::from_le_bytes(entropy_hash[0..8].try_into().unwrap());
+            accumulated_entropy = accumulated_entropy.wrapping_add(entropy_score % 10000);
+
+            // Rotation conditions (multiple triggers):
+            let should_rotate =
+                // 1. Entropy threshold exceeded
+                (accumulated_entropy >= ENTROPY_THRESHOLD) ||
+                // 2. Time-based with randomness (prevents exact prediction)
+                (time_elapsed >= base_interval_secs && entropy_score % 100 < 50) ||
+                // 3. Usage-based: too many sessions
+                (sessions.len() >= 1000) ||
+                // 4. Request count threshold
+                (metrics.total_requests >= 100_000 && time_elapsed >= 6 * 3600);
+
+            drop(metrics);
+            drop(sessions);
+
+            if should_rotate {
+                println!("🔄 Key rotation triggered:");
+                println!("   Time elapsed: {}h", time_elapsed / 3600);
+                println!("   Accumulated entropy: {}", accumulated_entropy);
+                println!("   Chain height: {}", chain_height);
+
+                // Regenerate identity keys
+                let mut identity = self.identity.write().await;
+                match create_secure_rpc_identity() {
+                    Ok(new_identity) => {
+                        let new_node_id = new_identity.node_id;
+                        *identity = new_identity;
+                        drop(identity);
+                        *self.last_key_rotation.write().await = Instant::now();
+                        accumulated_entropy = 0;
+
+                        println!("✅ Node identity keys rotated");
+                        println!("   New node ID: {}", hex::encode(&new_node_id));
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️  Key rotation failed: {}", e);
+                    }
                 }
             }
         }
