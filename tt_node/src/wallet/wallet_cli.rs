@@ -53,6 +53,45 @@ const WALLET_MAX_SIZE: u64 = 1 << 20;
 const BECH32_HRP_TTQ: &str = "ttq";
 
 /* =========================================================================================
+ * BECH32 ADRES PQ (ttq)
+ * ====================================================================================== */
+
+/// Surowy 32-bajtowy identyfikator adresu (TTQ),
+/// używany jako NodeId / AddressId po stronie noda.
+/// 
+/// Dokładnie: SHAKE256(Falcon_PK || MLKEM_PK)[0..32]
+pub fn raw_addr_from_keys(
+    falcon_pk: &falcon512::PublicKey,
+    mlkem_pk: &mlkem::PublicKey,
+) -> [u8; 32] {
+    let mut h = Shake256::default();
+    h.update(falcon_pk.as_bytes());
+    h.update(mlkem_pk.as_bytes());
+    let mut rdr = h.finalize_xof();
+    let mut d = [0u8; 32];
+    rdr.read(&mut d);
+    d
+}
+
+fn bech32_addr_quantum_short(
+    falcon_pk: &falcon512::PublicKey,
+    mlkem_pk: &mlkem::PublicKey,
+) -> Result<String> {
+    use bech32::{Bech32m, Hrp};
+
+    let d = raw_addr_from_keys(falcon_pk, mlkem_pk);
+
+    // 0x03 = typ adresu PQ
+    let mut payload = Vec::with_capacity(33);
+    payload.push(0x03);
+    payload.extend_from_slice(&d);
+
+    let hrp = Hrp::parse(BECH32_HRP_TTQ)?;
+    Ok(bech32::encode::<Bech32m>(hrp, &payload)?)
+}
+
+
+/* =========================================================================================
  * CLI
  * ====================================================================================== */
 
@@ -159,7 +198,7 @@ enum PepperPolicy {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct WalletHeader {
+pub(crate) struct WalletHeader {
     version: u32,
     kdf: KdfHeader,
     aead: AeadKind,
@@ -167,7 +206,7 @@ struct WalletHeader {
     nonce24_opt: Option<[u8; 24]>,
     padding_block: u16,
     pepper: PepperPolicy,
-    wallet_id: [u8; 16],
+    pub(crate) wallet_id: [u8; 16],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -204,9 +243,9 @@ struct WalletSecretPayloadV3 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct WalletFile {
-    header: WalletHeader,
-    enc: Vec<u8>,
+pub(crate) struct WalletFile {
+    pub(crate) header: WalletHeader,
+    pub(crate) enc: Vec<u8>,
 }
 
 /// Zestaw kluczy PQ (już zmaterializowany z bytes)
@@ -240,31 +279,6 @@ impl Keyset {
     }
 }
 
-/* =========================================================================================
- * BECH32 ADRES PQ (ttq)
- * ====================================================================================== */
-
-fn bech32_addr_quantum_short(
-    falcon_pk: &falcon512::PublicKey,
-    mlkem_pk: &mlkem::PublicKey,
-) -> Result<String> {
-    use bech32::{Bech32m, Hrp};
-
-    let mut h = Shake256::default();
-    h.update(falcon_pk.as_bytes());
-    h.update(mlkem_pk.as_bytes());
-    let mut rdr = h.finalize_xof();
-    let mut d = [0u8; 32];
-    rdr.read(&mut d);
-
-    // 0x03 = typ adresu PQ (możesz zmienić, ale trzymaj stałą)
-    let mut payload = Vec::with_capacity(33);
-    payload.push(0x03);
-    payload.extend_from_slice(&d);
-
-    let hrp = Hrp::parse(BECH32_HRP_TTQ)?;
-    Ok(bech32::encode::<Bech32m>(hrp, &payload)?)
-}
 
 /* =========================================================================================
  * PEPPER PROVIDER
@@ -507,11 +521,19 @@ fn decrypt_wallet_v3(
     Ok(w)
 }
 
+pub(crate) fn decrypt_wallet_file_to_keyset(
+    wf: &WalletFile,
+    password: &str,
+) -> Result<Keyset> {
+    let secret = decrypt_wallet_v3(&wf.enc, password, &wf.header)?;
+    Keyset::from_payload_v3(&secret)
+}
+
 /* =========================================================================================
  * WALLET FILE OPERATIONS
  * ====================================================================================== */
 
-fn load_wallet_file(path: &PathBuf) -> Result<WalletFile> {
+pub(crate) fn load_wallet_file(path: &PathBuf) -> Result<WalletFile> {
     let meta = fs::metadata(path)?;
     ensure!(meta.len() <= WALLET_MAX_SIZE, "wallet file too large");
     let buf = fs::read(path)?;

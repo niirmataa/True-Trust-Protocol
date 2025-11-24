@@ -12,6 +12,13 @@ use sha3::{
     digest::{ExtendableOutput, Update, XofReader},
     Shake256,
 };
+use sha3::{Digest, Sha3_256};
+use pqcrypto_traits::sign::PublicKey as PQSignPublicKey;
+use pqcrypto_traits::kem::PublicKey as PQKemPublicKey;
+
+use crate::falcon_sigs::FalconPublicKey;
+use crate::kyber_kem::KyberPublicKey;
+
 
 /// Global node identifier used by RTT / consensus / P2P.
 ///

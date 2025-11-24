@@ -15,6 +15,10 @@ name = "tt_wallet"
 path = "src/bin/wallet.rs"
 required-features = ["wallet"]
 
+[[bin]]
+name = "advanced_node"
+path = "src/bin/advanced_node.rs"
+required-features = ["wallet"]
 
 [[example]]
 name = "mining_demo"
@@ -85,7 +89,6 @@ winterfell_v2 = ["winterfell"]
 seeded_falcon = ["falcon_seeded"]
 wallet = ["rpassword", "dirs", "bech32", "sharks", "argon2"]
 winterfell = ["dep:winterfell"]
-poseidon_param_gen = ["winterfell"]
 
 [profile.release]
 opt-level = 3

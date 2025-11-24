@@ -1,32 +1,11 @@
 #![forbid(unsafe_code)]
 
-//! Secure PQ RPC using enhanced P2P protocol (Falcon-512 + Kyber-768 + XChaCha20-Poly1305)
+//! Secure PQ RPC using PRO P2P (Falcon + Kyber + XChaCha20-Poly1305)
 //!
-//! ## Enhanced Security Architecture
-//!
-//! This implementation provides production-grade post-quantum security with:
-//! - **Identity**: Falcon-512 (long-term node keys) with key rotation support
-//! - **Key Exchange**: ML-KEM-768 (Kyber) with ephemeral key caching
-//! - **Encryption**: XChaCha20-Poly1305 AEAD with nonce management
-//! - **Transcript**: SHA3-256 hash chain with domain separation
-//! - **KDF**: KMAC256-XOF with context binding
-//! - **Rate Limiting**: Token bucket algorithm
-//! - **DDoS Protection**: Connection limits and proof-of-work
-//!
-//! ## Enhanced Protocol Flow
-//!
-//! ```text
-//! Client                          RPC Server
-//!   |  ClientHello(Falcon, Kyber, PoW) |
-//!   |--------------------------------->|
-//!   |  ServerHello(Falcon, CT, sig)   |
-//!   |<---------------------------------|
-//!   |  ClientFinished(sig, HMAC)      |
-//!   |--------------------------------->|
-//!   |  ServerFinished(HMAC)           |
-//!   |<---------------------------------|
-//!   |  <== Secure Channel ==>         |
-//! ```
+//! - Handshake: ClientHello (Falcon+Kyber+PoW) → ServerHello(Falcon sig, Kyber CT) → ClientFinished(Falcon sig)
+//! - PoW: lekki SHA3-256 (anti-DDoS dla RPC, NIE konsensus – tam RandomX)
+//! - Kanał: XChaCha20-Poly1305, dwa klucze kierunkowe
+//! - Rate limiting + limit połączeń per IP.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -37,55 +16,42 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, Semaphore};
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::node_core::NodeCore;
 use crate::node_id::NodeId;
 use crate::p2p::secure::{
-    build_client_hello, build_client_finished, handle_client_hello, handle_server_hello,
-    verify_client_finished, ClientFinished, ClientHello, NodeIdentity, SecureChannel, ServerHello,
-    SessionKey, PROTOCOL_VERSION,
+    build_client_finished, build_client_hello, handle_client_hello, handle_server_hello,
+    verify_client_finished, ClientFinished, ClientHello, NodeIdentity, ServerHello,
+    TranscriptHasher, PROTOCOL_VERSION,
 };
+use crate::p2p::channel::SecureChannel;
+use crate::tx_stark::SignedStarkTx;
 
-/* ============================================================================
- * Security Constants
- * ========================================================================== */
+/* ============================================================================ */
+/* Security constants                                                           */
+/* ============================================================================ */
 
-/// Maximum message size (10MB)
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
-
-/// Session timeout (30 minutes)
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-
-/// Maximum concurrent connections per IP
 const MAX_CONNECTIONS_PER_IP: usize = 10;
-
-/// Rate limit: max requests per second
 const MAX_REQUESTS_PER_SECOND: u32 = 100;
-
-/// Proof-of-work difficulty (leading zero bits)
-const POW_DIFFICULTY: u32 = 20;
-
-/// Key rotation interval (24 hours)
+const POW_DIFFICULTY: u32 = 20; // do testów obniż np. do 10
 const KEY_ROTATION_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// Minimum time between renegotiations
 const MIN_RENEGOTIATION_INTERVAL: Duration = Duration::from_secs(60);
 
-/* ============================================================================
- * Enhanced Security Structures
- * ========================================================================== */
+/* ============================================================================ */
+/* PoW                                                                          */
+/* ============================================================================ */
 
-/// Proof-of-work challenge
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProofOfWork {
-    challenge: [u8; 32],
-    nonce: u64,
-    timestamp: u64,
+    pub challenge: [u8; 32],
+    pub nonce: u64,
+    pub timestamp: u64,
 }
 
 impl ProofOfWork {
-    /// Generate new PoW challenge
+    /// Nowe wyzwanie (tylko 32-bajtowy challenge).
     pub fn new_challenge() -> [u8; 32] {
         let mut challenge = [0u8; 32];
         use rand::RngCore;
@@ -93,11 +59,10 @@ impl ProofOfWork {
         challenge
     }
 
-    /// Verify proof-of-work
+    /// Weryfikacja PoW (leading zero bits >= difficulty).
     pub fn verify(&self, difficulty: u32) -> bool {
         use sha3::{Digest, Sha3_256};
-        
-        // Check timestamp (must be recent)
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -106,36 +71,37 @@ impl ProofOfWork {
             return false;
         }
 
-        // Compute hash
         let mut hasher = Sha3_256::new();
         hasher.update(&self.challenge);
         hasher.update(&self.nonce.to_le_bytes());
         hasher.update(&self.timestamp.to_le_bytes());
         let hash = hasher.finalize();
 
-        // Check leading zeros
-        let leading_zeros = hash.iter()
-            .take_while(|&&b| b == 0)
-            .count() * 8;
-        
-        leading_zeros >= difficulty as usize
+        let mut leading_bits: u32 = 0;
+        for &byte in hash.iter() {
+            if byte == 0 {
+                leading_bits += 8;
+            } else {
+                leading_bits += byte.leading_zeros();
+                break;
+            }
+        }
+
+        leading_bits >= difficulty
     }
 }
 
-/// Session state with enhanced tracking
-#[derive(ZeroizeOnDrop)]
-pub struct SessionState {
-    #[zeroize(skip)]
-    session_id: [u8; 32],
-    session_key: SessionKey,
-    created_at: Instant,
-    last_activity: Instant,
-    request_count: u64,
-    bytes_transferred: u64,
-    client_id: NodeId,
+/// Połączony komunikat: ClientHello + PoW.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ClientHelloWithPow {
+    ch: ClientHello,
+    pow: ProofOfWork,
 }
 
-/// Rate limiter using token bucket
+/* ============================================================================ */
+/* Rate limiter                                                                 */
+/* ============================================================================ */
+
 pub struct RateLimiter {
     tokens: f64,
     last_refill: Instant,
@@ -171,25 +137,24 @@ impl RateLimiter {
     }
 }
 
-/* ============================================================================
- * Enhanced RPC Messages
- * ========================================================================== */
+/* ============================================================================ */
+/* RPC messages                                                                 */
+/* ============================================================================ */
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RpcRequest {
     GetStatus,
     GetChainInfo,
     GetPeerCount,
-    SubmitTransaction { 
-        tx_hex: String,
-        priority: TransactionPriority,
-    },
+    SubmitTransaction { tx_hex: String, priority: TransactionPriority },
     GetBlockByHeight { height: u64 },
     GetBlockByHash { hash: String },
     GetMempool { limit: Option<usize> },
     GetNodeMetrics,
     SubscribeEvents { filter: EventFilter },
     UnsubscribeEvents { subscription_id: String },
+    GetBalance { address_hex: String },
+    SubmitSignedStarkTx { tx_hex: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -258,6 +223,15 @@ pub enum RpcResponse {
         message: String,
         data: Option<String>,
     },
+    Balance {
+        address_hex: String,
+        confirmed: u128,
+        pending: u128,
+    },
+    StarkTxSubmitted {
+        tx_id: String,
+        accepted: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -277,9 +251,28 @@ pub struct MempoolTx {
     pub timestamp: u64,
 }
 
-/* ============================================================================
- * Enhanced Secure RPC Server
- * ========================================================================== */
+/* ============================================================================ */
+/* Server                                                                      */
+/* ============================================================================ */
+
+#[derive(Debug, Clone)]
+struct SessionState {
+    session_id: [u8; 32],
+    created_at: Instant,
+    last_activity: Instant,
+    request_count: u64,
+    bytes_transferred: u64,
+    client_id: NodeId,
+}
+
+#[derive(Default, Debug, Clone)]
+struct ServerMetrics {
+    total_connections: u64,
+    active_connections: u64,
+    total_requests: u64,
+    failed_authentications: u64,
+    rate_limit_hits: u64,
+}
 
 pub struct SecureRpcServer {
     address: SocketAddr,
@@ -294,17 +287,7 @@ pub struct SecureRpcServer {
     last_key_rotation: Arc<RwLock<Instant>>,
 }
 
-#[derive(Default)]
-struct ServerMetrics {
-    total_connections: u64,
-    active_connections: u64,
-    total_requests: u64,
-    failed_authentications: u64,
-    rate_limit_hits: u64,
-}
-
 impl SecureRpcServer {
-    /// Create enhanced secure RPC server
     pub fn new(
         rpc_port: u16,
         identity: NodeIdentity,
@@ -320,73 +303,51 @@ impl SecureRpcServer {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             connection_limiter: Arc::new(RwLock::new(HashMap::new())),
             rate_limiters: Arc::new(RwLock::new(HashMap::new())),
-            connection_semaphore: Arc::new(Semaphore::new(1000)), // Max 1000 concurrent
+            connection_semaphore: Arc::new(Semaphore::new(1000)),
             metrics: Arc::new(RwLock::new(ServerMetrics::default())),
             last_key_rotation: Arc::new(RwLock::new(Instant::now())),
         }
     }
 
-    /// Start enhanced secure RPC server
     pub async fn start(self) -> Result<()> {
         let listener = TcpListener::bind(self.address)
             .await
             .context("Failed to bind RPC port")?;
+        println!("🔐 Secure PQ RPC listening on {}", self.address);
 
-        // Set socket options for better performance
-        let socket = socket2::Socket::from(listener.as_raw_fd());
-        socket.set_reuse_address(true)?;
-        socket.set_nodelay(true)?;
-        socket.set_keepalive(Some(Duration::from_secs(60)))?;
-
-        println!(
-            "🔐 Enhanced Secure PQ RPC listening on {}",
-            self.address
-        );
-        println!("   Protocol: Falcon-512 + Kyber-768 + XChaCha20-Poly1305");
-        println!("   Security: PoW + Rate Limiting + DDoS Protection");
-        
         let identity = self.identity.read().await;
-        println!(
-            "   Node ID: {}",
-            hex::encode(&identity.node_id)
-        );
+        println!("   Node ID: {}", hex::encode(&identity.node_id));
         drop(identity);
 
         let server = Arc::new(self);
 
-        // Spawn background tasks
-        let cleanup_server = Arc::clone(&server);
-        tokio::spawn(async move {
-            cleanup_server.cleanup_sessions_task().await;
-        });
+        // background tasks
+        {
+            let s = Arc::clone(&server);
+            tokio::spawn(async move { s.cleanup_sessions_task().await });
+        }
+        {
+            let s = Arc::clone(&server);
+            tokio::spawn(async move { s.key_rotation_task().await });
+        }
 
-        let rotation_server = Arc::clone(&server);
-        tokio::spawn(async move {
-            rotation_server.key_rotation_task().await;
-        });
-
-        // Main accept loop
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    // Apply connection limits
                     if !server.check_connection_limit(addr.ip()).await {
                         eprintln!("Connection limit exceeded for {}", addr.ip());
                         continue;
                     }
-
-                    // Acquire semaphore permit
                     let permit = server.connection_semaphore.clone().acquire_owned().await?;
-                    
-                    let server = Arc::clone(&server);
+                    let s = Arc::clone(&server);
                     tokio::spawn(async move {
-                        if let Err(e) = server.handle_connection(stream, addr).await {
+                        if let Err(e) = s.handle_connection(stream, addr).await {
                             if !e.to_string().contains("Connection reset") {
                                 eprintln!("RPC connection error from {}: {}", addr, e);
                             }
                         }
-                        drop(permit); // Release semaphore
-                        server.release_connection(addr.ip()).await;
+                        drop(permit);
+                        s.release_connection(addr.ip()).await;
                     });
                 }
                 Err(e) => {
@@ -397,27 +358,20 @@ impl SecureRpcServer {
         }
     }
 
-    /// Check and update connection limits
     async fn check_connection_limit(&self, ip: IpAddr) -> bool {
         let mut limiter = self.connection_limiter.write().await;
         let count = limiter.entry(ip).or_insert(0);
-        
         if *count >= MAX_CONNECTIONS_PER_IP {
-            let mut metrics = self.metrics.write().await;
-            metrics.rate_limit_hits += 1;
+            self.metrics.write().await.rate_limit_hits += 1;
             return false;
         }
-        
         *count += 1;
-        
         let mut metrics = self.metrics.write().await;
         metrics.total_connections += 1;
         metrics.active_connections += 1;
-        
         true
     }
 
-    /// Release connection
     async fn release_connection(&self, ip: IpAddr) {
         let mut limiter = self.connection_limiter.write().await;
         if let Some(count) = limiter.get_mut(&ip) {
@@ -426,245 +380,202 @@ impl SecureRpcServer {
                 limiter.remove(&ip);
             }
         }
-        
         let mut metrics = self.metrics.write().await;
         metrics.active_connections = metrics.active_connections.saturating_sub(1);
     }
 
-    /// Enhanced connection handler with full security
     async fn handle_connection(&self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
         println!("🔗 New RPC connection from {}", addr);
-
-        // Set TCP options
         stream.set_nodelay(true)?;
-        
-        // Apply rate limiting
-        let mut rate_limiters = self.rate_limiters.write().await;
-        let rate_limiter = rate_limiters
-            .entry(addr.ip())
-            .or_insert_with(|| RateLimiter::new(
-                MAX_REQUESTS_PER_SECOND * 2,
-                MAX_REQUESTS_PER_SECOND
-            ));
-        
-        if !rate_limiter.try_consume(1.0) {
-            bail!("Rate limit exceeded");
+
+        // rate limit per IP
+        {
+            let mut rls = self.rate_limiters.write().await;
+            let rl = rls
+                .entry(addr.ip())
+                .or_insert_with(|| RateLimiter::new(MAX_REQUESTS_PER_SECOND * 2, MAX_REQUESTS_PER_SECOND));
+            if !rl.try_consume(1.0) {
+                bail!("Rate limit exceeded");
+            }
         }
-        drop(rate_limiters);
 
-        // =================== ENHANCED HANDSHAKE ===================
-
-        // 1. Send PoW challenge
+        // === PoW challenge ===
         let pow_challenge = ProofOfWork::new_challenge();
         write_message(&mut stream, &pow_challenge).await?;
 
-        // 2. Receive ClientHello with PoW
-        let ch_bytes = read_message_with_timeout(&mut stream, Duration::from_secs(30)).await?;
-        let ch: ClientHello = bincode::deserialize(&ch_bytes)
-            .context("Failed to deserialize ClientHello")?;
+        // ClientHello + PoW
+        let ch_pow_bytes =
+            read_message_with_timeout(&mut stream, Duration::from_secs(30)).await?;
+        let ch_pow: ClientHelloWithPow =
+            bincode::deserialize(&ch_pow_bytes).context("Failed to deserialize ClientHelloWithPow")?;
 
-        // 3. Verify PoW
-        let pow: ProofOfWork = bincode::deserialize(&ch_bytes[ch_bytes.len() - 100..])
-            .context("Failed to deserialize PoW")?;
-        
-        if !pow.verify(POW_DIFFICULTY) {
-            let mut metrics = self.metrics.write().await;
-            metrics.failed_authentications += 1;
+        // verify PoW
+        ensure!(
+            ch_pow.pow.challenge == pow_challenge,
+            "PoW challenge mismatch"
+        );
+        if !ch_pow.pow.verify(POW_DIFFICULTY) {
+            self.metrics.write().await.failed_authentications += 1;
             bail!("Invalid proof-of-work");
         }
 
-        println!(
-            "   ClientHello from {} (PoW verified)",
-            hex::encode(&ch.node_id)
-        );
+        let ch = ch_pow.ch;
+        println!("   ClientHello from {}", hex::encode(&ch.node_id));
 
-        // 4. Process ClientHello and build ServerHello
-        let mut transcript = crate::p2p::secure::TranscriptHasher::new();
-        transcript.update(b"CH", &ch_bytes);
-
+        // === PQ handshake ===
         let identity = self.identity.read().await;
-        let (sh, session_key, transcript) = handle_client_hello(
-            &identity,
-            &ch,
-            PROTOCOL_VERSION,
-            transcript,
-        )
-        .context("ClientHello validation failed")?;
+        let transcript = TranscriptHasher::new();
+        let (sh, session_keys, transcript) =
+            handle_client_hello(&identity, &ch, PROTOCOL_VERSION, transcript)
+                .context("ClientHello validation failed")?;
         drop(identity);
 
-        // 5. Send ServerHello
+        // ServerHello
         let sh_bytes = bincode::serialize(&sh)?;
         write_message(&mut stream, &sh_bytes).await?;
 
-        println!("   ServerHello sent");
+        // ClientFinished
+        let cf_bytes =
+            read_message_with_timeout(&mut stream, Duration::from_secs(10)).await?;
+        let cf: ClientFinished =
+            bincode::deserialize(&cf_bytes).context("Failed to deserialize ClientFinished")?;
+        let _transcript =
+            verify_client_finished(&ch.falcon_pk, transcript, &cf)
+                .context("ClientFinished verification failed")?;
 
-        // 6. Receive ClientFinished
-        let cf_bytes = read_message_with_timeout(&mut stream, Duration::from_secs(10)).await?;
-        let cf: ClientFinished = bincode::deserialize(&cf_bytes)
-            .context("Failed to deserialize ClientFinished")?;
+        println!("   ✅ PQ handshake complete!");
 
-        // 7. Verify ClientFinished
-        verify_client_finished(&ch.falcon_pk, transcript.clone(), &cf)
-            .context("ClientFinished verification failed")?;
-
-        // 8. Send ServerFinished (additional confirmation)
-        let server_finished = self.create_server_finished(&session_key, &transcript).await?;
-        write_message(&mut stream, &server_finished).await?;
-
-        println!("   ✅ Enhanced PQ handshake complete!");
-
-        // Store session
         let session_id = self.generate_session_id(&ch.node_id);
-        let session = SessionState {
-            session_id,
-            session_key: session_key.clone(),
-            created_at: Instant::now(),
-            last_activity: Instant::now(),
-            request_count: 0,
-            bytes_transferred: 0,
-            client_id: ch.node_id,
-        };
-        
-        self.sessions.write().await.insert(session_id, session);
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(
+                session_id,
+                SessionState {
+                    session_id,
+                    created_at: Instant::now(),
+                    last_activity: Instant::now(),
+                    request_count: 0,
+                    bytes_transferred: 0,
+                    client_id: ch.node_id,
+                },
+            );
+        }
 
-        // =================== SECURE CHANNEL WITH MONITORING ===================
-
-        let mut channel = SecureChannel::new(session_key);
+        let mut channel = SecureChannel::new_server(&session_keys);
         let mut last_renegotiation = Instant::now();
 
         loop {
-            // Check session timeout
-            if session.created_at.elapsed() > SESSION_TIMEOUT {
-                println!("   Session timeout for {}", addr);
-                break;
-            }
-
-            // Check if renegotiation needed
-            if last_renegotiation.elapsed() > MIN_RENEGOTIATION_INTERVAL 
-                && channel.should_renegotiate() {
-                println!("   Initiating session renegotiation");
-                // TODO: Implement secure renegotiation
-                last_renegotiation = Instant::now();
-            }
-
-            // Read encrypted request with timeout
-            match read_secure_message_with_timeout(
-                &mut stream, 
-                &mut channel, 
-                Duration::from_secs(60)
-            ).await {
-                Ok(req_bytes) => {
-                    // Update metrics
-                    self.update_session_metrics(&session_id, req_bytes.len()).await;
-                    
-                    // Apply rate limiting per request
-                    let mut rate_limiters = self.rate_limiters.write().await;
-                    let rate_limiter = rate_limiters.get_mut(&addr.ip()).unwrap();
-                    if !rate_limiter.try_consume(1.0) {
-                        let error = RpcResponse::Error {
-                            code: 429,
-                            message: "Rate limit exceeded".to_string(),
-                            data: None,
-                        };
-                        let resp_bytes = bincode::serialize(&error)?;
-                        write_secure_message(&mut stream, &mut channel, &resp_bytes).await?;
-                        continue;
+            // session timeout
+            {
+                let sessions = self.sessions.read().await;
+                if let Some(st) = sessions.get(&session_id) {
+                    if st.created_at.elapsed() > SESSION_TIMEOUT {
+                        println!("   Session timeout for {}", addr);
+                        break;
                     }
-                    drop(rate_limiters);
-
-                    // Deserialize and validate request
-                    let request: RpcRequest = match bincode::deserialize(&req_bytes) {
-                        Ok(req) => req,
-                        Err(e) => {
-                            let error = RpcResponse::Error {
-                                code: 400,
-                                message: format!("Invalid request: {}", e),
-                                data: None,
-                            };
-                            let resp_bytes = bincode::serialize(&error)?;
-                            write_secure_message(&mut stream, &mut channel, &resp_bytes).await?;
-                            continue;
-                        }
-                    };
-
-                    println!("   RPC request: {:?}", request);
-
-                    // Process request with timeout
-                    let response = tokio::time::timeout(
-                        Duration::from_secs(30),
-                        self.process_request(request)
-                    ).await
-                    .unwrap_or_else(|_| RpcResponse::Error {
-                        code: 408,
-                        message: "Request timeout".to_string(),
-                        data: None,
-                    });
-
-                    // Send encrypted response
-                    let resp_bytes = bincode::serialize(&response)?;
-                    write_secure_message(&mut stream, &mut channel, &resp_bytes).await?;
-                    
-                    // Update metrics
-                    self.update_session_metrics(&session_id, resp_bytes.len()).await;
-                }
-                Err(e) => {
-                    // Connection closed or error
-                    println!("   Connection closed: {}", e);
+                } else {
                     break;
                 }
             }
+
+            if last_renegotiation.elapsed() > MIN_RENEGOTIATION_INTERVAL
+                && channel.should_renegotiate()
+            {
+                // TODO: renegocjacja kluczy
+                last_renegotiation = Instant::now();
+            }
+
+            let req_bytes = match read_secure_message_with_timeout(
+                &mut stream,
+                &mut channel,
+                Duration::from_secs(60),
+            )
+            .await
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    println!("   Connection closed: {}", e);
+                    break;
+                }
+            };
+
+            self.update_session_metrics(&session_id, req_bytes.len()).await;
+
+            // per-request rate limit
+            {
+                let mut rls = self.rate_limiters.write().await;
+                let rl = rls.get_mut(&addr.ip()).unwrap();
+                if !rl.try_consume(1.0) {
+                    let err = RpcResponse::Error {
+                        code: 429,
+                        message: "Rate limit exceeded".to_string(),
+                        data: None,
+                    };
+                    let resp_bytes = bincode::serialize(&err)?;
+                    write_secure_message(&mut stream, &mut channel, &resp_bytes).await?;
+                    continue;
+                }
+            }
+
+            // deserializacja requestu
+            let request: RpcRequest = match bincode::deserialize(&req_bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = RpcResponse::Error {
+                        code: 400,
+                        message: format!("Invalid request: {}", e),
+                        data: None,
+                    };
+                    let resp_bytes = bincode::serialize(&err)?;
+                    write_secure_message(&mut stream, &mut channel, &resp_bytes).await?;
+                    continue;
+                }
+            };
+
+            let response = tokio::time::timeout(
+                Duration::from_secs(30),
+                self.process_request(request),
+            )
+            .await
+            .unwrap_or_else(|_| RpcResponse::Error {
+                code: 408,
+                message: "Request timeout".to_string(),
+                data: None,
+            });
+
+            let resp_bytes = bincode::serialize(&response)?;
+            write_secure_message(&mut stream, &mut channel, &resp_bytes).await?;
+            self.update_session_metrics(&session_id, resp_bytes.len()).await;
         }
 
-        // Clean up session
         self.sessions.write().await.remove(&session_id);
-
         Ok(())
     }
 
-    /// Generate secure session ID
-    fn generate_session_id(&self, client_id: &[u8]) -> [u8; 32] {
+    fn generate_session_id(&self, client_id: &NodeId) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
-        let mut hasher = Sha3_256::new();
-        hasher.update(client_id);
-        hasher.update(&Instant::now().elapsed().as_nanos().to_le_bytes());
-        
-        let mut session_id = [0u8; 32];
-        session_id.copy_from_slice(&hasher.finalize());
-        session_id
+        let mut h = Sha3_256::new();
+        h.update(client_id);
+        h.update(&Instant::now().elapsed().as_nanos().to_le_bytes());
+        let digest = h.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        out
     }
 
-    /// Create ServerFinished message
-    async fn create_server_finished(
-        &self,
-        session_key: &SessionKey,
-        transcript: &crate::p2p::secure::TranscriptHasher,
-    ) -> Result<Vec<u8>> {
-        use hmac::{Hmac, Mac};
-        use sha3::Sha3_256;
-        
-        type HmacSha3 = Hmac<Sha3_256>;
-        
-        let mut mac = HmacSha3::new_from_slice(session_key.as_bytes())
-            .context("Invalid key length")?;
-        mac.update(transcript.as_bytes());
-        
-        Ok(mac.finalize().into_bytes().to_vec())
-    }
-
-    /// Update session metrics
     async fn update_session_metrics(&self, session_id: &[u8; 32], bytes: usize) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.last_activity = Instant::now();
-            session.request_count += 1;
-            session.bytes_transferred += bytes as u64;
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(st) = sessions.get_mut(session_id) {
+                st.last_activity = Instant::now();
+                st.request_count += 1;
+                st.bytes_transferred += bytes as u64;
+            }
         }
-        
         let mut metrics = self.metrics.write().await;
         metrics.total_requests += 1;
     }
 
-    /// Enhanced request processing
     async fn process_request(&self, request: RpcRequest) -> RpcResponse {
         match request {
             RpcRequest::GetStatus => {
@@ -673,7 +584,6 @@ impl SecureRpcServer {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
-                    
                 let identity = self.identity.read().await;
                 RpcResponse::Status {
                     node_id: hex::encode(&identity.node_id),
@@ -687,7 +597,6 @@ impl SecureRpcServer {
                     uptime,
                 }
             }
-
             RpcRequest::GetChainInfo => {
                 let height = self.node.get_chain_height().await;
                 let best = self.node.get_best_block_hash().await;
@@ -698,7 +607,6 @@ impl SecureRpcServer {
                     network_difficulty: "1000000".to_string(),
                 }
             }
-
             RpcRequest::GetPeerCount => {
                 let count = self.node.get_peer_count().await;
                 RpcResponse::PeerCount {
@@ -707,23 +615,20 @@ impl SecureRpcServer {
                     outbound: count / 2,
                 }
             }
-
             RpcRequest::SubmitTransaction { tx_hex, priority } => {
                 match hex::decode(&tx_hex) {
                     Ok(tx_bytes) => {
-                        // Apply priority-based processing
-                        let fee_multiplier = match priority {
+                        let fee_mult = match priority {
                             TransactionPriority::Low => 1,
                             TransactionPriority::Normal => 2,
                             TransactionPriority::High => 3,
                             TransactionPriority::Critical => 5,
                         };
-                        
                         match self.node.submit_transaction(&tx_bytes).await {
                             Ok(tx_id) => RpcResponse::TxSubmitted {
                                 tx_id: hex::encode(tx_id),
                                 accepted: true,
-                                fee_paid: 1000 * fee_multiplier,
+                                fee_paid: 1000 * fee_mult,
                             },
                             Err(e) => RpcResponse::Error {
                                 code: 500,
@@ -734,67 +639,72 @@ impl SecureRpcServer {
                     }
                     Err(_) => RpcResponse::Error {
                         code: 400,
-                        message: "Invalid hex encoding".to_string(),
+                        message: "Invalid hex encoding".into(),
                         data: None,
                     },
                 }
             }
-
-            RpcRequest::GetNodeMetrics => {
-                let metrics = self.metrics.read().await;
-                RpcResponse::NodeMetrics {
-                    cpu_usage: 25.5,
-                    memory_usage: 45.2,
-                    disk_usage: 62.8,
-                    network_in: 1024000,
-                    network_out: 2048000,
+            RpcRequest::GetBalance { address_hex } => {
+                match hex::decode(&address_hex) {
+                    Ok(bytes) if bytes.len() == 32 => {
+                        let mut id = [0u8; 32];
+                        id.copy_from_slice(&bytes);
+                        let bal = self.node.get_balance(&id).await;
+                        RpcResponse::Balance {
+                            address_hex,
+                            confirmed: bal,
+                            pending: 0,
+                        }
+                    }
+                    _ => RpcResponse::Error {
+                        code: 400,
+                        message: "Invalid address (must be 32-byte hex)".into(),
+                        data: None,
+                    },
                 }
             }
-
+            RpcRequest::SubmitSignedStarkTx { tx_hex } => {
+                match hex::decode(&tx_hex) {
+                    Ok(bytes) => {
+                        match bincode::deserialize::<SignedStarkTx>(&bytes) {
+                            Ok(stx) => {
+                                match self.node.submit_signed_stark_tx(&stx).await {
+                                    Ok(tx_id) => RpcResponse::StarkTxSubmitted {
+                                        tx_id: hex::encode(tx_id),
+                                        accepted: true,
+                                    },
+                                    Err(e) => RpcResponse::Error {
+                                        code: 500,
+                                        message: format!("TX rejected: {e}"),
+                                        data: None,
+                                    },
+                                }
+                            }
+                            Err(e) => RpcResponse::Error {
+                                code: 400,
+                                message: format!("Invalid SignedStarkTx encoding: {e}"),
+                                data: None,
+                            },
+                        }
+                    }
+                    Err(_) => RpcResponse::Error {
+                        code: 400,
+                        message: "Invalid hex encoding".into(),
+                        data: None,
+                    },
+                }
+            }
             _ => RpcResponse::Error {
                 code: 501,
-                message: "Method not implemented".to_string(),
+                message: "Not implemented".into(),
                 data: None,
-            }
+            },
         }
     }
 
-    /// Background task: Clean up expired sessions
-    async fn cleanup_sessions_task(&self) {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        
-        loop {
-            interval.tick().await;
-            
-            let mut sessions = self.sessions.write().await;
-            let now = Instant::now();
-            
-            sessions.retain(|_, session| {
-                now.duration_since(session.last_activity) < SESSION_TIMEOUT
-            });
-        }
-    }
-
-    /// Background task: Rotate keys periodically
-    async fn key_rotation_task(&self) {
-        let mut interval = tokio::time::interval(KEY_ROTATION_INTERVAL);
-        
-        loop {
-            interval.tick().await;
-            
-            let mut last_rotation = self.last_key_rotation.write().await;
-            if last_rotation.elapsed() >= KEY_ROTATION_INTERVAL {
-                println!("🔄 Rotating ephemeral keys...");
-                // TODO: Implement key rotation
-                *last_rotation = Instant::now();
-            }
-        }
-    }
-}
-
-/* ============================================================================
- * Enhanced Secure RPC Client
- * ========================================================================== */
+/* ============================================================================ */
+/* Client                                                                       */
+/* ============================================================================ */
 
 pub struct SecureRpcClient {
     server_addr: SocketAddr,
@@ -807,7 +717,6 @@ pub struct SecureRpcClient {
 }
 
 impl SecureRpcClient {
-    /// Create enhanced secure RPC client
     pub fn new(server_addr: SocketAddr, identity: NodeIdentity) -> Self {
         Self {
             server_addr,
@@ -820,49 +729,36 @@ impl SecureRpcClient {
         }
     }
 
-    /// Connect with enhanced security
     pub async fn connect(&mut self) -> Result<()> {
         println!("🔐 Connecting to secure RPC at {}", self.server_addr);
-
         let mut stream = TcpStream::connect(self.server_addr)
             .await
             .context("Failed to connect to RPC server")?;
-        
         stream.set_nodelay(true)?;
 
-        // =================== ENHANCED CLIENT HANDSHAKE ===================
+        // PoW challenge
+        let pow_challenge_bytes =
+            read_message_with_timeout(&mut stream, Duration::from_secs(10)).await?;
+        let pow_challenge: [u8; 32] = pow_challenge_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("Invalid PoW challenge length"))?;
 
-        // 1. Receive PoW challenge
-        let pow_challenge_bytes = read_message_with_timeout(
-            &mut stream, 
-            Duration::from_secs(10)
-        ).await?;
-        let pow_challenge: [u8; 32] = pow_challenge_bytes.try_into()
-            .map_err(|_| anyhow!("Invalid PoW challenge"))?;
-
-        // 2. Solve PoW
         let pow = self.solve_pow(pow_challenge, POW_DIFFICULTY).await?;
 
-        // 3. Build and send ClientHello with PoW
+        // ClientHello + transcript
         let (ch, transcript) = build_client_hello(&self.identity, PROTOCOL_VERSION)?;
-        let mut ch_bytes = bincode::serialize(&ch)?;
-        ch_bytes.extend_from_slice(&bincode::serialize(&pow)?);
-        write_message(&mut stream, &ch_bytes).await?;
+        let ch_pow = ClientHelloWithPow { ch: ch.clone(), pow };
+        let ch_pow_bytes = bincode::serialize(&ch_pow)?;
+        write_message(&mut stream, &ch_pow_bytes).await?;
 
-        println!("   ClientHello sent with PoW");
+        // ServerHello
+        let sh_bytes =
+            read_message_with_timeout(&mut stream, Duration::from_secs(10)).await?;
+        let sh: ServerHello =
+            bincode::deserialize(&sh_bytes).context("Failed to deserialize ServerHello")?;
 
-        // 4. Receive ServerHello
-        let sh_bytes = read_message_with_timeout(&mut stream, Duration::from_secs(10)).await?;
-        let sh: ServerHello = bincode::deserialize(&sh_bytes)
-            .context("Failed to deserialize ServerHello")?;
-
-        println!(
-            "   ServerHello from {}",
-            hex::encode(&sh.node_id)
-        );
-
-        // 5. Verify ServerHello
-        let (session_key, transcript) = handle_server_hello(
+        let (session_keys, transcript) = handle_server_hello(
             &self.identity,
             &ch,
             &sh,
@@ -871,20 +767,14 @@ impl SecureRpcClient {
         )
         .context("ServerHello verification failed")?;
 
-        // 6. Build and send ClientFinished
-        let (cf, transcript) = build_client_finished(&self.identity, transcript)?;
+        // ClientFinished
+        let (cf, _transcript) = build_client_finished(&self.identity, transcript)?;
         let cf_bytes = bincode::serialize(&cf)?;
         write_message(&mut stream, &cf_bytes).await?;
 
-        // 7. Receive ServerFinished
-        let sf_bytes = read_message_with_timeout(&mut stream, Duration::from_secs(10)).await?;
-        self.verify_server_finished(&session_key, &transcript, &sf_bytes)?;
+        println!("   ✅ PQ handshake complete!");
 
-        println!("   ✅ Enhanced PQ handshake complete!");
-
-        // =================== SECURE CHANNEL ESTABLISHED ===================
-
-        self.channel = Some(SecureChannel::new(session_key));
+        self.channel = Some(SecureChannel::new_client(&session_keys));
         self.stream = Some(stream);
         self.session_id = Some(self.generate_session_id());
         self.last_activity = Instant::now();
@@ -892,15 +782,14 @@ impl SecureRpcClient {
         Ok(())
     }
 
-    /// Solve proof-of-work challenge
     async fn solve_pow(&self, challenge: [u8; 32], difficulty: u32) -> Result<ProofOfWork> {
         use sha3::{Digest, Sha3_256};
-        
+
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let mut nonce = 0u64;
         loop {
             let mut hasher = Sha3_256::new();
@@ -908,51 +797,32 @@ impl SecureRpcClient {
             hasher.update(&nonce.to_le_bytes());
             hasher.update(&timestamp.to_le_bytes());
             let hash = hasher.finalize();
-            
-            let leading_zeros = hash.iter()
-                .take_while(|&&b| b == 0)
-                .count() * 8;
-            
-            if leading_zeros >= difficulty as usize {
+
+            let mut leading_bits = 0u32;
+            for &byte in hash.iter() {
+                if byte == 0 {
+                    leading_bits += 8;
+                } else {
+                    leading_bits += byte.leading_zeros();
+                    break;
+                }
+            }
+
+            if leading_bits >= difficulty {
                 return Ok(ProofOfWork {
                     challenge,
                     nonce,
                     timestamp,
                 });
             }
-            
-            nonce += 1;
-            
-            // Yield occasionally to avoid blocking
-            if nonce % 10000 == 0 {
+
+            nonce = nonce.wrapping_add(1);
+            if nonce % 10_000 == 0 {
                 tokio::task::yield_now().await;
             }
         }
     }
 
-    /// Verify ServerFinished message
-    fn verify_server_finished(
-        &self,
-        session_key: &SessionKey,
-        transcript: &crate::p2p::secure::TranscriptHasher,
-        sf_bytes: &[u8],
-    ) -> Result<()> {
-        use hmac::{Hmac, Mac};
-        use sha3::Sha3_256;
-        
-        type HmacSha3 = Hmac<Sha3_256>;
-        
-        let mut mac = HmacSha3::new_from_slice(session_key.as_bytes())
-            .context("Invalid key length")?;
-        mac.update(transcript.as_bytes());
-        
-        mac.verify_slice(sf_bytes)
-            .map_err(|_| anyhow!("ServerFinished verification failed"))?;
-        
-        Ok(())
-    }
-
-    /// Generate session ID
     fn generate_session_id(&self) -> [u8; 32] {
         use rand::RngCore;
         let mut id = [0u8; 32];
@@ -960,38 +830,7 @@ impl SecureRpcClient {
         id
     }
 
-    /// Send request with retry logic
-    pub async fn request_with_retry(
-        &mut self,
-        req: RpcRequest,
-        max_retries: u32,
-    ) -> Result<RpcResponse> {
-        let mut retries = 0;
-        
-        loop {
-            match self.request(req.clone()).await {
-                Ok(response) => return Ok(response),
-                Err(e) if retries < max_retries => {
-                    eprintln!("Request failed (retry {}/{}): {}", retries + 1, max_retries, e);
-                    retries += 1;
-                    
-                    // Exponential backoff
-                    let delay = Duration::from_millis(100 * (2_u64.pow(retries)));
-                    tokio::time::sleep(delay).await;
-                    
-                    // Reconnect if needed
-                    if self.stream.is_none() {
-                        self.connect().await?;
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-
-    /// Send RPC request
     pub async fn request(&mut self, req: RpcRequest) -> Result<RpcResponse> {
-        // Check session timeout
         if self.last_activity.elapsed() > SESSION_TIMEOUT {
             self.reconnect().await?;
         }
@@ -1005,33 +844,25 @@ impl SecureRpcClient {
             .as_mut()
             .ok_or_else(|| anyhow!("No secure channel"))?;
 
-        // Send encrypted request
         let req_bytes = bincode::serialize(&req)?;
         write_secure_message(stream, channel, &req_bytes).await?;
 
-        // Receive encrypted response with timeout
-        let resp_bytes = read_secure_message_with_timeout(
-            stream,
-            channel,
-            Duration::from_secs(30),
-        ).await?;
-        
-        let response: RpcResponse = bincode::deserialize(&resp_bytes)
-            .context("Failed to deserialize RPC response")?;
+        let resp_bytes =
+            read_secure_message_with_timeout(stream, channel, Duration::from_secs(30)).await?;
+        let resp: RpcResponse =
+            bincode::deserialize(&resp_bytes).context("Failed to deserialize RPC response")?;
 
         self.request_count += 1;
         self.last_activity = Instant::now();
 
-        Ok(response)
+        Ok(resp)
     }
 
-    /// Reconnect to server
     async fn reconnect(&mut self) -> Result<()> {
         self.close().await?;
         self.connect().await
     }
 
-    /// Close connection gracefully
     pub async fn close(&mut self) -> Result<()> {
         if let Some(mut stream) = self.stream.take() {
             stream.shutdown().await?;
@@ -1042,20 +873,10 @@ impl SecureRpcClient {
     }
 }
 
-// Ensure sensitive data is zeroed on drop
-impl Drop for SecureRpcClient {
-    fn drop(&mut self) {
-        if let Some(ref mut channel) = self.channel {
-            // Channel implements ZeroizeOnDrop
-        }
-    }
-}
+/* ============================================================================ */
+/* Message framing + secure wrapper                                            */
+/* ============================================================================ */
 
-/* ============================================================================
- * Enhanced Message Framing with Timeout
- * ========================================================================== */
-
-/// Read message with timeout
 async fn read_message_with_timeout(
     stream: &mut TcpStream,
     timeout: Duration,
@@ -1065,214 +886,61 @@ async fn read_message_with_timeout(
         .context("Read timeout")?
 }
 
-/// Read length-prefixed message
 async fn read_message(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    // Read 4-byte length prefix
     let mut len_buf = [0u8; 4];
     stream
         .read_exact(&mut len_buf)
         .await
         .context("Failed to read message length")?;
     let len = u32::from_be_bytes(len_buf) as usize;
-
-    // Security check
-    ensure!(
-        len <= MAX_MESSAGE_SIZE,
-        "Message too large: {} bytes (max: {})",
-        len,
-        MAX_MESSAGE_SIZE
-    );
-
-    // Read message body
+    ensure!(len <= MAX_MESSAGE_SIZE, "Message too large");
     let mut buf = vec![0u8; len];
     stream
         .read_exact(&mut buf)
         .await
         .context("Failed to read message body")?;
-
     Ok(buf)
 }
 
-/// Write length-prefixed message
 async fn write_message(stream: &mut TcpStream, data: &[u8]) -> Result<()> {
-    ensure!(
-        data.len() <= MAX_MESSAGE_SIZE,
-        "Message too large: {} bytes",
-        data.len()
-    );
-
-    // Write 4-byte length prefix
+    ensure!(data.len() <= MAX_MESSAGE_SIZE, "Message too large");
     let len = data.len() as u32;
     stream.write_all(&len.to_be_bytes()).await?;
-
-    // Write message body
     stream.write_all(data).await?;
     stream.flush().await?;
-
     Ok(())
 }
 
-/// Read encrypted message with timeout
 async fn read_secure_message_with_timeout(
     stream: &mut TcpStream,
     channel: &mut SecureChannel,
     timeout: Duration,
 ) -> Result<Vec<u8>> {
     let ciphertext = read_message_with_timeout(stream, timeout).await?;
-    
-    // Decrypt with AEAD
     let plaintext = channel
         .decrypt(&ciphertext, b"")
         .context("AEAD decryption failed")?;
-
     Ok(plaintext)
 }
 
-/// Read encrypted message
-async fn read_secure_message(
-    stream: &mut TcpStream,
-    channel: &mut SecureChannel,
-) -> Result<Vec<u8>> {
-    let ciphertext = read_message(stream).await?;
-
-    // Decrypt with AEAD
-    let plaintext = channel
-        .decrypt(&ciphertext, b"")
-        .context("AEAD decryption failed")?;
-
-    Ok(plaintext)
-}
-
-/// Write encrypted message
 async fn write_secure_message(
     stream: &mut TcpStream,
     channel: &mut SecureChannel,
     plaintext: &[u8],
 ) -> Result<()> {
-    // Encrypt with AEAD
     let ciphertext = channel
         .encrypt(plaintext, b"")
         .context("AEAD encryption failed")?;
-
     write_message(stream, &ciphertext).await
 }
 
-/* ============================================================================
- * Helper Functions
- * ========================================================================== */
+/* ============================================================================ */
+/* Helper: create RPC identity from PQ keys                                    */
+/* ============================================================================ */
 
-/// Create RPC identity with secure key generation
+/// Buduje RPC identity z losowych PQ kluczy.
 pub fn create_secure_rpc_identity() -> Result<NodeIdentity> {
-    use rand::RngCore;
-    
-    // Generate fresh Falcon-512 keypair
-    let (falcon_pk, falcon_sk) = crate::falcon_sigs::FalconKeypair::generate()?;
-    
-    // Generate fresh Kyber-768 keypair  
-    let (kyber_pk, kyber_sk) = crate::kyber_kem::KyberKeypair::generate()?;
-    
-    // Create identity
+    let (falcon_pk, falcon_sk) = crate::falcon_sigs::falcon_keypair();
+    let (kyber_pk, kyber_sk) = crate::kyber_kem::kyber_keypair();
     Ok(NodeIdentity::from_keys(falcon_pk, falcon_sk, kyber_pk, kyber_sk))
 }
-
-/// Benchmark PoW difficulty
-pub async fn benchmark_pow_difficulty(target_seconds: f64) -> u32 {
-    use sha3::{Digest, Sha3_256};
-    use std::time::Instant;
-    
-    let challenge = ProofOfWork::new_challenge();
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    
-    for difficulty in 10..30 {
-        let start = Instant::now();
-        let mut nonce = 0u64;
-        
-        loop {
-            let mut hasher = Sha3_256::new();
-            hasher.update(&challenge);
-            hasher.update(&nonce.to_le_bytes());
-            hasher.update(&timestamp.to_le_bytes());
-            let hash = hasher.finalize();
-            
-            let leading_zeros = hash.iter()
-                .take_while(|&&b| b == 0)
-                .count() * 8;
-            
-            if leading_zeros >= difficulty as usize {
-                let elapsed = start.elapsed().as_secs_f64();
-                if elapsed >= target_seconds {
-                    return difficulty;
-                }
-                break;
-            }
-            
-            nonce += 1;
-        }
-    }
-    
-    20 // Default difficulty
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_proof_of_work() {
-        let pow = ProofOfWork {
-            challenge: [0u8; 32],
-            nonce: 12345,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-        
-        // Should fail with high difficulty
-        assert!(!pow.verify(100));
-    }
-
-    #[tokio::test]
-    async fn test_rate_limiter() {
-        let mut limiter = RateLimiter::new(10, 5);
-        
-        // Should allow initial burst
-        for _ in 0..10 {
-            assert!(limiter.try_consume(1.0));
-        }
-        
-        // Should be rate limited
-        assert!(!limiter.try_consume(1.0));
-        
-        // Wait and retry
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(limiter.try_consume(1.0));
-    }
-
-    #[tokio::test]
-    async fn test_session_id_generation() {
-        let server = SecureRpcServer::new(
-            8080,
-            create_secure_rpc_identity().unwrap(),
-            false,
-            Arc::new(NodeCore::new()),
-        );
-        
-        let id1 = server.generate_session_id(b"client1");
-        let id2 = server.generate_session_id(b"client1");
-        
-        // Should generate different IDs even for same client
-        assert_ne!(id1, id2);
-    }
-}
-
-// Use std::os::unix::prelude::AsRawFd for Unix systems
-#[cfg(unix)]
-use std::os::unix::prelude::AsRawFd;
-
-// Use std::os::windows::prelude::AsRawSocket for Windows
-#[cfg(windows)]  
-use std::os::windows::prelude::AsRawSocket;

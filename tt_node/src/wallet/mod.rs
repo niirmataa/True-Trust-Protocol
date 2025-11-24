@@ -2,3 +2,4 @@
 
 #[cfg(feature = "wallet")]
 pub mod wallet_cli;
+pub mod wallet_api;

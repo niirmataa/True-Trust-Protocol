@@ -22,7 +22,6 @@ use tokio::signal;
 mod core;
 mod chain_store;
 mod state_priv;
-mod randomx_full;
 
 mod falcon_sigs;
 mod kyber_kem;
@@ -42,7 +41,7 @@ mod crypto;
 mod pqc_verification;
 mod p2p;
 mod node_core;
-
+mod randomx_pow;
 
 #[cfg(feature = "wallet")]
 pub mod wallet;
