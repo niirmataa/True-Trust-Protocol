@@ -186,12 +186,28 @@ impl P2PNetwork {
 
     /// Prosty broadcast: wysyła bajty do wszystkich peerów (zaszyfrowane).
     pub async fn broadcast(&self, payload: &[u8]) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
         let peers = self.peers.read().await;
+
         for (node_id, peer) in peers.iter() {
-            let mut conn = peer.conn.lock().await;
-            if let Err(e) =
-                write_secure_message(&mut conn.stream, &mut conn.channel, payload).await
-            {
+            let mut conn_guard = peer.conn.lock().await;
+
+            // 1. Najpierw szyfrujemy wiadomość, używając tylko channel
+            let ciphertext = match conn_guard.channel.encrypt(payload, &[]) {
+                Ok(ct) => ct,
+                Err(e) => {
+                    eprintln!(
+                        "[P2P] encrypt for {} failed: {}",
+                        hex::encode(node_id),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            // 2. Dopiero potem bierzemy stream i wysyłamy ciphertext
+            if let Err(e) = conn_guard.stream.write_all(&ciphertext).await {
                 eprintln!(
                     "[P2P] send to {} failed: {}",
                     hex::encode(node_id),
@@ -199,6 +215,7 @@ impl P2PNetwork {
                 );
             }
         }
+
         Ok(())
     }
 

@@ -290,32 +290,42 @@ impl CompositeProver {
     }
 
     pub fn build_trace(&self, witness: &Witness) -> TraceTable<BaseElement> {
+        // -----------------------------------------
+        // 1) Długość śladu = najbliższa potęga dwójki
+        // -----------------------------------------
         let range_rows = self.num_bits + 1;
-        let trace_rows = range_rows + TOTAL_ROUNDS + 1;
+        let base_rows = range_rows + TOTAL_ROUNDS + 1; // range + poseidon
+        let trace_rows = base_rows.next_power_of_two(); // np. 134 -> 256
 
         let mut trace = vec![vec![BaseElement::ZERO; trace_rows]; NUM_COLUMNS];
 
-        // RANGE
+        // -----------------------------------------
+        // 2) RANGE część: sum, pow2, bit
+        // -----------------------------------------
         trace[COL_SUM][0] = BaseElement::ZERO;
         trace[COL_POW2][0] = BaseElement::ONE;
 
         for i in 0..(trace_rows - 1) {
-            if i < self.num_bits {
-                let bit = ((witness.value >> i) & 1) as u64;
-                trace[COL_BIT][i] = BaseElement::from(bit);
+            let bit_u64 = if i < self.num_bits {
+                ((witness.value >> i) & 1) as u64
             } else {
-                trace[COL_BIT][i] = BaseElement::ZERO;
-            }
+                0u64
+            };
+            let bit = BaseElement::from(bit_u64);
+            trace[COL_BIT][i] = bit;
 
             let sum = trace[COL_SUM][i];
-            let bit = trace[COL_BIT][i];
             let pow2 = trace[COL_POW2][i];
 
             trace[COL_SUM][i + 1] = sum + bit * pow2;
             trace[COL_POW2][i + 1] = pow2 + pow2;
         }
 
-        // POSEIDON
+        // od wiersza `self.num_bits` suma jest już stała == value
+
+        // -----------------------------------------
+        // 3) Inicjalizacja stanu Poseidona
+        // -----------------------------------------
         let poseidon_start = self.num_bits;
 
         let value_fe = BaseElement::from(witness.value);
@@ -334,21 +344,32 @@ impl CompositeProver {
         for i in 0..POSEIDON_WIDTH {
             trace[COL_POSEIDON_STATE_START + i][poseidon_start] = initial_state[i];
         }
+        // link: lane z value ma być powiązany z SUM (range część)
         trace[COL_SEL_LINK][poseidon_start] = BaseElement::ONE;
 
+        // -----------------------------------------
+        // 4) Faktyczne rundy Poseidona
+        // -----------------------------------------
         for r in 0..TOTAL_ROUNDS {
             let row = poseidon_start + r;
+            if row + 1 >= trace_rows {
+                panic!("internal error: poseidon row out of bounds");
+            }
 
             trace[COL_SEL_POSEIDON][row] = BaseElement::ONE;
 
-            let is_full = r < FULL_ROUNDS / 2 || r >= (FULL_ROUNDS / 2 + PARTIAL_ROUNDS);
-            trace[COL_SEL_FULL][row] = if is_full { BaseElement::ONE } else { BaseElement::ZERO };
+            let is_full =
+                r < FULL_ROUNDS / 2 || r >= (FULL_ROUNDS / 2 + PARTIAL_ROUNDS);
+            trace[COL_SEL_FULL][row] =
+                if is_full { BaseElement::ONE } else { BaseElement::ZERO };
 
+            // round constants
             for i in 0..POSEIDON_WIDTH {
                 trace[COL_RC_START + i][row] =
                     crate::crypto::poseidon_params::ROUND_CONSTANTS[r][i];
             }
 
+            // current state
             let mut cur_state = [BaseElement::ZERO; POSEIDON_WIDTH];
             for i in 0..POSEIDON_WIDTH {
                 cur_state[i] = trace[COL_POSEIDON_STATE_START + i][row];
@@ -359,6 +380,7 @@ impl CompositeProver {
                 x[i] = cur_state[i] + trace[COL_RC_START + i][row];
             }
 
+            // S-Box x^5
             let mut sbox = [BaseElement::ZERO; POSEIDON_WIDTH];
             for i in 0..POSEIDON_WIDTH {
                 let xi = x[i];
@@ -367,6 +389,7 @@ impl CompositeProver {
                 sbox[i] = xi * xi4;
             }
 
+            // pełne / częściowe rundy
             let mut y = [BaseElement::ZERO; POSEIDON_WIDTH];
             if is_full {
                 y.copy_from_slice(&sbox);
@@ -377,11 +400,12 @@ impl CompositeProver {
                 }
             }
 
+            // MDS
             let mut next_state = [BaseElement::ZERO; POSEIDON_WIDTH];
             for i in 0..POSEIDON_WIDTH {
                 let mut acc = BaseElement::ZERO;
                 for j in 0..POSEIDON_WIDTH {
-                    acc += y[j] * MDS_MATRIX[i][j];
+                    acc += y[j] * crate::crypto::poseidon_params::MDS_MATRIX[i][j];
                 }
                 next_state[i] = acc;
             }
@@ -393,12 +417,32 @@ impl CompositeProver {
         }
 
         let last_poseidon_row = poseidon_start + TOTAL_ROUNDS;
+        assert!(last_poseidon_row < trace_rows);
+
+        // Na wierszu "po ostatniej rundzie" już nie wykonujemy kolejnego kroku Poseidona
         trace[COL_SEL_POSEIDON][last_poseidon_row] = BaseElement::ZERO;
         trace[COL_SEL_FULL][last_poseidon_row] = BaseElement::ZERO;
+
+        // -----------------------------------------
+        // 5) Padding do końca śladu (no-op Poseidon)
+        //    - stan Poseidona przepisywany 1:1
+        //    - selektory = 0, więc AIR pozwala na "brak kroku"
+        // -----------------------------------------
+        for row in (last_poseidon_row + 1)..trace_rows {
+            for i in 0..POSEIDON_WIDTH {
+                trace[COL_POSEIDON_STATE_START + i][row] =
+                    trace[COL_POSEIDON_STATE_START + i][row - 1];
+                trace[COL_RC_START + i][row] = BaseElement::ZERO;
+            }
+            trace[COL_SEL_POSEIDON][row] = BaseElement::ZERO;
+            trace[COL_SEL_FULL][row] = BaseElement::ZERO;
+            trace[COL_SEL_LINK][row] = BaseElement::ZERO;
+        }
 
         TraceTable::init(trace)
     }
 }
+
 
 impl Prover for CompositeProver {
     type BaseField = BaseElement;

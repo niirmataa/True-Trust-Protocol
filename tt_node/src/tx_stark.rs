@@ -24,12 +24,12 @@ use crate::core::Hash32;
 use crate::crypto::poseidon_hash_cpu::poseidon_hash_cpu;
 use crate::crypto::zk_range_poseidon::{
     Witness as RangeWitness,
-    PublicInputs as RangePubInputs,
-    default_proof_options,
+    PublicInputs as RangePublicInputs,
     prove_range_with_poseidon,
     verify_range_with_poseidon,
 };
-
+ use crate::crypto::zk_range_poseidon::default_proof_options;
+ 
 /// Kyber768 ciphertext size (1088 bytes)
 const KYBER768_CT_BYTES: usize = 1088;
 
