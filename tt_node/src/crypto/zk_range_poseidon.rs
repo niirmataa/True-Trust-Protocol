@@ -1,9 +1,5 @@
 #![forbid(unsafe_code)]
-// BEZ: #![cfg(feature = "winterfell_v2")]
 
-// Composite Range Proof + Poseidon commitment (0 <= v < 2^k, link + hash)
-
-use serde::{Deserialize, Serialize};
 use winterfell::{
     verify, AcceptableOptions, Air, AirContext, Assertion, BatchingMethod, CompositionPoly,
     CompositionPolyTrace, DefaultConstraintCommitment, DefaultConstraintEvaluator,
@@ -16,19 +12,19 @@ use winterfell::{
 };
 
 use crate::crypto::poseidon_hash_cpu::{
-    poseidon_hash_cpu, POSEIDON_VALUE_LANE, POSEIDON_BLINDING_LANE, POSEIDON_RECIPIENT_LANE,
+    POSEIDON_VALUE_LANE, POSEIDON_BLINDING_LANE, POSEIDON_RECIPIENT_LANE,
 };
 use crate::crypto::poseidon_params::{
-    POSEIDON_WIDTH, FULL_ROUNDS, PARTIAL_ROUNDS, TOTAL_ROUNDS, MDS_MATRIX,
+    POSEIDON_WIDTH, FULL_ROUNDS, PARTIAL_ROUNDS, TOTAL_ROUNDS, MDS_MATRIX, ROUND_CONSTANTS,
 };
 
-/// =====================
-/// Public Inputs
-/// =====================
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Public inputs STARK-a:
+/// - value_commitment: integer reprezentujący element pola (BaseElement::as_int())
+/// - recipient: 32 bajty, STARK używa tylko pierwszych 8,
+/// - num_bits: długość przedziału.
+#[derive(Clone, Debug)]
 pub struct PublicInputs {
-    pub value_commitment: u64,
+    pub value_commitment: u128,
     pub recipient: [u8; 32],
     pub num_bits: u32,
 }
@@ -37,8 +33,8 @@ impl ToElements<BaseElement> for PublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
         let mut els = Vec::with_capacity(1 + 4 + 1);
 
-        // commitment jako jedno pole – zakładamy, że mieści się w u64
-        els.push(BaseElement::from(self.value_commitment));
+        // commitment jako element pola
+        els.push(BaseElement::new(self.value_commitment));
 
         // recipient jako cztery u64
         for chunk in self.recipient.chunks(8) {
@@ -52,10 +48,7 @@ impl ToElements<BaseElement> for PublicInputs {
     }
 }
 
-/// =====================
-/// Witness
-/// =====================
-
+/// Witness: wartość, blinding, recipient.
 #[derive(Clone, Debug)]
 pub struct Witness {
     pub value: u64,
@@ -69,10 +62,7 @@ impl Witness {
     }
 }
 
-/// =====================
-/// Trace columns
-/// =====================
-
+/// Kolumny śladu
 const COL_SUM: usize = 0;
 const COL_BIT: usize = 1;
 const COL_POW2: usize = 2;
@@ -89,17 +79,12 @@ const COL_SEL_LINK: usize = COL_SEL_FULL + 1;
 
 const NUM_COLUMNS: usize = COL_SEL_LINK + 1;
 
-/// =====================
-/// AIR
-/// =====================
-
+/// AIR dla range + Poseidon
 pub struct CompositeRangeAir {
     context: AirContext<BaseElement>,
     value_commitment: BaseElement,
     recipient_elem: BaseElement,
     num_bits: usize,
-    range_rows: usize,
-    poseidon_rows: usize,
 }
 
 impl Air for CompositeRangeAir {
@@ -110,20 +95,18 @@ impl Air for CompositeRangeAir {
         assert_eq!(trace_info.width(), NUM_COLUMNS);
 
         let num_bits = pub_inputs.num_bits as usize;
-        let range_rows = num_bits + 1;
-        let poseidon_rows = TOTAL_ROUNDS + 1;
-
         let t = POSEIDON_WIDTH;
 
         let mut degrees = Vec::new();
+
         // range
         degrees.push(TransitionConstraintDegree::new(2)); // sum
         degrees.push(TransitionConstraintDegree::new(1)); // pow2
         degrees.push(TransitionConstraintDegree::new(2)); // bit
 
-        // poseidon step
+        // poseidon step: x^5 + selektory + MDS → stopień 7
         for _ in 0..t {
-            degrees.push(TransitionConstraintDegree::new(6));
+            degrees.push(TransitionConstraintDegree::new(7));
         }
         // poseidon const / no-op
         for _ in 0..t {
@@ -136,9 +119,9 @@ impl Air for CompositeRangeAir {
         degrees.push(TransitionConstraintDegree::new(2)); // s_full <= s_poseidon
         degrees.push(TransitionConstraintDegree::new(2)); // link
 
-        let num_assertions = 5; // SUM[0], POW2[0], BIT[num_bits], recipient lane, final commitment
+        let num_assertions = 5;
 
-        let value_commitment = BaseElement::from(pub_inputs.value_commitment);
+        let value_commitment = BaseElement::new(pub_inputs.value_commitment);
 
         let mut rbytes = [0u8; 8];
         rbytes.copy_from_slice(&pub_inputs.recipient[..8]);
@@ -149,8 +132,6 @@ impl Air for CompositeRangeAir {
             value_commitment,
             recipient_elem,
             num_bits,
-            range_rows,
-            poseidon_rows,
         }
     }
 
@@ -275,10 +256,7 @@ impl Air for CompositeRangeAir {
     }
 }
 
-/// =====================
 /// Prover
-/// =====================
-
 pub struct CompositeProver {
     options: ProofOptions,
     num_bits: usize,
@@ -290,18 +268,13 @@ impl CompositeProver {
     }
 
     pub fn build_trace(&self, witness: &Witness) -> TraceTable<BaseElement> {
-        // -----------------------------------------
-        // 1) Długość śladu = najbliższa potęga dwójki
-        // -----------------------------------------
         let range_rows = self.num_bits + 1;
-        let base_rows = range_rows + TOTAL_ROUNDS + 1; // range + poseidon
-        let trace_rows = base_rows.next_power_of_two(); // np. 134 -> 256
+        let base_rows = range_rows + TOTAL_ROUNDS + 1;
+        let trace_rows = base_rows.next_power_of_two();
 
         let mut trace = vec![vec![BaseElement::ZERO; trace_rows]; NUM_COLUMNS];
 
-        // -----------------------------------------
-        // 2) RANGE część: sum, pow2, bit
-        // -----------------------------------------
+        // RANGE
         trace[COL_SUM][0] = BaseElement::ZERO;
         trace[COL_POW2][0] = BaseElement::ONE;
 
@@ -321,35 +294,38 @@ impl CompositeProver {
             trace[COL_POW2][i + 1] = pow2 + pow2;
         }
 
-        // od wiersza `self.num_bits` suma jest już stała == value
-
-        // -----------------------------------------
-        // 3) Inicjalizacja stanu Poseidona
-        // -----------------------------------------
         let poseidon_start = self.num_bits;
 
         let value_fe = BaseElement::from(witness.value);
-        let blind_fe = BaseElement::from(u64::from_le_bytes(
-            witness.blinding[0..8].try_into().unwrap(),
-        ));
-        let recip_fe = BaseElement::from(u64::from_le_bytes(
-            witness.recipient[0..8].try_into().unwrap(),
-        ));
+
+        let mut blind_bytes = [0u8; 8];
+        blind_bytes.copy_from_slice(&witness.blinding[..8]);
+        let blind_fe = BaseElement::from(u64::from_le_bytes(blind_bytes));
+
+        let mut recip_bytes = [0u8; 8];
+        recip_bytes.copy_from_slice(&witness.recipient[..8]);
+        let recip_fe = BaseElement::from(u64::from_le_bytes(recip_bytes));
 
         let mut initial_state = [BaseElement::ZERO; POSEIDON_WIDTH];
         initial_state[POSEIDON_VALUE_LANE] = value_fe;
         initial_state[POSEIDON_BLINDING_LANE] = blind_fe;
         initial_state[POSEIDON_RECIPIENT_LANE] = recip_fe;
 
+        // Stan Poseidona stały, dopóki s_poseidon = 0
         for i in 0..POSEIDON_WIDTH {
-            trace[COL_POSEIDON_STATE_START + i][poseidon_start] = initial_state[i];
+            trace[COL_POSEIDON_STATE_START + i][0] = initial_state[i];
         }
-        // link: lane z value ma być powiązany z SUM (range część)
+        for row in 1..=poseidon_start {
+            for i in 0..POSEIDON_WIDTH {
+                trace[COL_POSEIDON_STATE_START + i][row] =
+                    trace[COL_POSEIDON_STATE_START + i][row - 1];
+            }
+        }
+
+        // link w wierszu startu Poseidona: value lane == SUM
         trace[COL_SEL_LINK][poseidon_start] = BaseElement::ONE;
 
-        // -----------------------------------------
-        // 4) Faktyczne rundy Poseidona
-        // -----------------------------------------
+        // Poseidon rounds
         for r in 0..TOTAL_ROUNDS {
             let row = poseidon_start + r;
             if row + 1 >= trace_rows {
@@ -363,13 +339,10 @@ impl CompositeProver {
             trace[COL_SEL_FULL][row] =
                 if is_full { BaseElement::ONE } else { BaseElement::ZERO };
 
-            // round constants
             for i in 0..POSEIDON_WIDTH {
-                trace[COL_RC_START + i][row] =
-                    crate::crypto::poseidon_params::ROUND_CONSTANTS[r][i];
+                trace[COL_RC_START + i][row] = ROUND_CONSTANTS[r][i];
             }
 
-            // current state
             let mut cur_state = [BaseElement::ZERO; POSEIDON_WIDTH];
             for i in 0..POSEIDON_WIDTH {
                 cur_state[i] = trace[COL_POSEIDON_STATE_START + i][row];
@@ -380,7 +353,6 @@ impl CompositeProver {
                 x[i] = cur_state[i] + trace[COL_RC_START + i][row];
             }
 
-            // S-Box x^5
             let mut sbox = [BaseElement::ZERO; POSEIDON_WIDTH];
             for i in 0..POSEIDON_WIDTH {
                 let xi = x[i];
@@ -389,7 +361,6 @@ impl CompositeProver {
                 sbox[i] = xi * xi4;
             }
 
-            // pełne / częściowe rundy
             let mut y = [BaseElement::ZERO; POSEIDON_WIDTH];
             if is_full {
                 y.copy_from_slice(&sbox);
@@ -400,12 +371,11 @@ impl CompositeProver {
                 }
             }
 
-            // MDS
             let mut next_state = [BaseElement::ZERO; POSEIDON_WIDTH];
             for i in 0..POSEIDON_WIDTH {
                 let mut acc = BaseElement::ZERO;
                 for j in 0..POSEIDON_WIDTH {
-                    acc += y[j] * crate::crypto::poseidon_params::MDS_MATRIX[i][j];
+                    acc += y[j] * MDS_MATRIX[i][j];
                 }
                 next_state[i] = acc;
             }
@@ -419,15 +389,10 @@ impl CompositeProver {
         let last_poseidon_row = poseidon_start + TOTAL_ROUNDS;
         assert!(last_poseidon_row < trace_rows);
 
-        // Na wierszu "po ostatniej rundzie" już nie wykonujemy kolejnego kroku Poseidona
         trace[COL_SEL_POSEIDON][last_poseidon_row] = BaseElement::ZERO;
         trace[COL_SEL_FULL][last_poseidon_row] = BaseElement::ZERO;
 
-        // -----------------------------------------
-        // 5) Padding do końca śladu (no-op Poseidon)
-        //    - stan Poseidona przepisywany 1:1
-        //    - selektory = 0, więc AIR pozwala na "brak kroku"
-        // -----------------------------------------
+        // Padding
         for row in (last_poseidon_row + 1)..trace_rows {
             for i in 0..POSEIDON_WIDTH {
                 trace[COL_POSEIDON_STATE_START + i][row] =
@@ -442,7 +407,6 @@ impl CompositeProver {
         TraceTable::init(trace)
     }
 }
-
 
 impl Prover for CompositeProver {
     type BaseField = BaseElement;
@@ -460,13 +424,22 @@ impl Prover for CompositeProver {
 
     fn get_pub_inputs(&self, trace: &Self::Trace) -> PublicInputs {
         let last = trace.length() - 1;
+
         let commitment_elem =
             trace.get(COL_POSEIDON_STATE_START + POSEIDON_VALUE_LANE, last);
-        let commitment = commitment_elem.as_int() as u64;
+        let commitment_int = commitment_elem.as_int(); // u128
+
+        let recip_elem =
+            trace.get(COL_POSEIDON_STATE_START + POSEIDON_RECIPIENT_LANE, self.num_bits);
+        let recip_u64 = recip_elem.as_int() as u64;
+        let recip_bytes = recip_u64.to_le_bytes();
+
+        let mut recipient = [0u8; 32];
+        recipient[..8].copy_from_slice(&recip_bytes);
 
         PublicInputs {
-            value_commitment: commitment,
-            recipient: [0u8; 32],
+            value_commitment: commitment_int,
+            recipient,
             num_bits: self.num_bits as u32,
         }
     }
@@ -510,9 +483,7 @@ impl Prover for CompositeProver {
     }
 }
 
-/// =====================
 /// High-level API
-/// =====================
 
 pub fn default_proof_options() -> ProofOptions {
     ProofOptions::new(
@@ -534,9 +505,7 @@ pub fn prove_range_with_poseidon(
 ) -> (Proof, PublicInputs) {
     let prover = CompositeProver::new(num_bits, options);
     let trace = prover.build_trace(&witness);
-    let mut pub_inputs = prover.get_pub_inputs(&trace);
-    pub_inputs.recipient = witness.recipient;
-
+    let pub_inputs = prover.get_pub_inputs(&trace);
     let proof = prover.prove(trace).expect("proof generation failed");
     (proof, pub_inputs)
 }
@@ -555,6 +524,7 @@ pub fn verify_range_with_poseidon(proof: Proof, pub_inputs: PublicInputs) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::poseidon_hash_cpu::poseidon_hash_cpu;
 
     #[test]
     fn test_poseidon_cpu_vs_trace() {
@@ -581,13 +551,12 @@ mod tests {
         let witness = Witness::new(42, [9u8; 32], [5u8; 32]);
         let opts = default_proof_options();
 
-        let (proof, mut pub_inputs) = prove_range_with_poseidon(
+        let (proof, pub_inputs) = prove_range_with_poseidon(
             witness.clone(),
             64,
             opts,
         );
 
-        pub_inputs.recipient = witness.recipient;
         assert!(verify_range_with_poseidon(proof, pub_inputs));
     }
 }

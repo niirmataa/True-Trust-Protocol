@@ -1,35 +1,25 @@
 #![forbid(unsafe_code)]
 
 //! Post-Quantum Transactions with STARK Range Proofs (Winterfell)
-//!
-//! - ZK range proof: 0 <= value < 2^k, z linkiem do Poseidon commitment
-//! - Commitment: Poseidon(value, blinding, recipient) w BaseElement (u64 przez as_int())
-//! - Szyfrowanie wartości: Kyber768 + XChaCha20-Poly1305
-//!
-//! Powiązania:
-//! - STARK public input zawiera `poseidon_commitment` i `recipient`
-//! - Encrypted payload zawiera (value, blinding)
-//! - Przy decrypt: liczymy Poseidon(value, blinding, recipient) i porównujemy z commitment
-//!   oraz weryfikujemy STARK proof na tych samych public inputs.
 
 use serde::{Serialize, Deserialize};
 use sha3::{Sha3_256, Digest};
 use rand::RngCore;
 
 use winterfell::Proof as StarkProof;
-use winterfell::math::StarkField;
-use crate::falcon_sigs::BlockSignature;
+use winterfell::math::{FieldElement, StarkField};
 
+use crate::falcon_sigs::BlockSignature;
 use crate::core::Hash32;
 use crate::crypto::poseidon_hash_cpu::poseidon_hash_cpu;
 use crate::crypto::zk_range_poseidon::{
     Witness as RangeWitness,
-    PublicInputs as RangePublicInputs,
+    PublicInputs as RangePubInputs,
+    default_proof_options,
     prove_range_with_poseidon,
     verify_range_with_poseidon,
 };
- use crate::crypto::zk_range_poseidon::default_proof_options;
- 
+
 /// Kyber768 ciphertext size (1088 bytes)
 const KYBER768_CT_BYTES: usize = 1088;
 
@@ -38,8 +28,8 @@ const VALUE_NUM_BITS: usize = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxOutputStark {
-    /// Poseidon(value, blinding, recipient) jako u64 (BaseElement::as_int() castowane)
-    pub poseidon_commitment: u64,
+    /// Poseidon(value, blinding, recipient) jako u128 (BaseElement::as_int())
+    pub poseidon_commitment: u128,
 
     /// STARK proof zakodowany jako bajty (Winterfell::Proof::to_bytes)
     pub stark_proof: Vec<u8>,
@@ -58,26 +48,27 @@ impl TxOutputStark {
         recipient: Hash32,
         recipient_kyber_pk: &crate::kyber_kem::KyberPublicKey,
     ) -> Self {
-        // 1) Commitment po stronie CPU (musi być identyczny jak w STARKu)
+        // 1) Commitment po stronie CPU
         let poseidon_elem = poseidon_hash_cpu(value, blinding, &recipient);
-        let poseidon_commitment = poseidon_elem.as_int() as u64;
+        let poseidon_commitment: u128 = poseidon_elem.as_int();
 
         // 2) ZK range proof z linkiem do Poseidon commitment
         let witness = RangeWitness::new(value, *blinding, recipient);
         let opts = default_proof_options();
-        let (proof, mut pub_inputs) = prove_range_with_poseidon(witness, VALUE_NUM_BITS, opts);
 
-        // pub_inputs.value_commitment powstał z trace’u, powinien się równać temu z CPU
+        let (proof, pub_inputs) = prove_range_with_poseidon(
+            witness,
+            VALUE_NUM_BITS,
+            opts,
+        );
+
+        // Spójność: commitment z trace == CPU
         debug_assert_eq!(
             pub_inputs.value_commitment,
             poseidon_commitment,
             "Poseidon commitment from STARK trace != CPU hash"
         );
 
-        // nadpisujemy recipient w public inputs: musi być identyczny z polem w UTXO
-        pub_inputs.recipient = recipient;
-
-        // Serializacja proofa i *jawne* przeniesienie commitmentu (jako u64)
         let stark_proof = proof.to_bytes();
 
         // 3) Kyber768: encapsulation + wyprowadzenie klucza AEAD
@@ -123,16 +114,17 @@ impl TxOutputStark {
 
     /// Weryfikacja tylko STARK-a (bez decryptowania)
     pub fn verify(&self) -> bool {
-        // Deserializacja proofa z bajtów
         let proof = match StarkProof::from_bytes(&self.stark_proof) {
             Ok(p) => p,
             Err(_) => return false,
         };
 
-        // Odtwarzamy public inputs z danych w UTXO
-        let pub_inputs = RangePublicInputs {
+        let mut stark_recipient = [0u8; 32];
+        stark_recipient[..8].copy_from_slice(&self.recipient[..8]);
+
+        let pub_inputs = RangePubInputs {
             value_commitment: self.poseidon_commitment,
-            recipient: self.recipient,
+            recipient: stark_recipient,
             num_bits: VALUE_NUM_BITS as u32,
         };
 
@@ -144,7 +136,6 @@ impl TxOutputStark {
         &self,
         kyber_sk: &crate::kyber_kem::KyberSecretKey,
     ) -> Option<(u64, [u8; 32])> {
-        use pqcrypto_traits::kem::Ciphertext as KemCt;
         use chacha20poly1305::{
             XChaCha20Poly1305, Key, XNonce,
             aead::{Aead, KeyInit},
@@ -161,7 +152,8 @@ impl TxOutputStark {
 
         let kyber_ct = crate::kyber_kem::kyber_ct_from_bytes(kyber_ct_bytes).ok()?;
         let ss = crate::kyber_kem::kyber_decapsulate(&kyber_ct, kyber_sk).ok()?;
-        let aes_key = crate::kyber_kem::derive_aes_key_from_shared_secret(&ss, b"TX_VALUE_ENC");
+        let aes_key =
+            crate::kyber_kem::derive_aes_key_from_shared_secret(&ss, b"TX_VALUE_ENC");
 
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&aes_key));
         let nonce = XNonce::from_slice(nonce_bytes);
@@ -188,15 +180,13 @@ impl TxOutputStark {
     ) -> Option<u64> {
         let (value, blinding) = self.decrypt_value(kyber_sk)?;
 
-        // Sprawdzenie commitmentu: Poseidon(value, blinding, recipient)
         let poseidon_elem = poseidon_hash_cpu(value, &blinding, &self.recipient);
-        let expected_commitment = poseidon_elem.as_int() as u64;
+        let expected_commitment: u128 = poseidon_elem.as_int();
 
         if expected_commitment != self.poseidon_commitment {
             return None;
         }
 
-        // Sprawdzenie STARK proofa
         if !self.verify() {
             return None;
         }
@@ -250,32 +240,22 @@ impl TransactionStark {
     }
 }
 
-/// Signed Stark transaction:
-/// - `tx_bytes`        – zserializowany `TransactionStark` (bincode),
-/// - `signer_pk_bytes` – Falcon-512 public key w postaci bytes,
-/// - `signature`       – Falcon signature na tx_id (hash32).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignedStarkTx {
-    /// Raw bincode-encoded TransactionStark
     pub tx_bytes: Vec<u8>,
-    /// Falcon-512 public key of the signer (serialized bytes)
     pub signer_pk_bytes: Vec<u8>,
-    /// Falcon signature over tx_id (BlockSignature = SignedNullifier)
     pub signature: BlockSignature,
 }
 
 impl SignedStarkTx {
-    /// Parse inner TransactionStark from bytes
-    pub fn parse_tx(&self) -> std::result::Result<TransactionStark, String> {
+    pub fn parse_tx(&self) -> Result<TransactionStark, String> {
         TransactionStark::from_bytes(&self.tx_bytes)
     }
 
-    /// Convenience: compute tx_id (hash32) from inner tx
-    pub fn tx_id(&self) -> std::result::Result<crate::core::Hash32, String> {
+    pub fn tx_id(&self) -> Result<crate::core::Hash32, String> {
         self.parse_tx().map(|tx| tx.id())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -296,12 +276,10 @@ mod tests {
         );
 
         assert!(!output.stark_proof.is_empty());
-        assert_ne!(output.poseidon_commitment, 0);
+        assert_ne!(output.poseidon_commitment, 0u128);
 
-        // STARK proof powinien przejść
         assert!(output.verify());
 
-        // decrypt + verify powinno zwrócić tę samą wartość
         let val = output.decrypt_and_verify(&kyber_sk).expect("decrypt_and_verify failed");
         assert_eq!(val, 100_000);
     }

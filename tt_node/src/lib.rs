@@ -22,14 +22,9 @@ pub mod crypto;
 pub mod pqc_verification;
 pub mod node_core;
 pub mod hybrid_commit;
+pub mod stealth_pq;
+pub mod simple_pq_tx;
 
-#[cfg(feature = "networking")]
 pub mod p2p;
-
-#[cfg(feature = "networking")]
 pub mod rpc;
-
-
-
-#[cfg(feature = "wallet")]
 pub mod wallet;

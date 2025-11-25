@@ -45,12 +45,18 @@ mod pqc_verification;
 mod p2p;
 mod node_core;
 mod randomx_pow;
+mod rpc;
+mod stealth_pq;
+mod simple_pq_tx;
 
 #[cfg(feature = "wallet")]
 pub mod wallet;
 
 // P2P secure identity (Falcon + Kyber + fingerprint)
 use p2p::secure::SecureNodeIdentity;
+// Node core + secure RPC server
+use node_core::NodeCore;
+use rpc::rpc_secure::SecureRpcServer;
 
 /// TRUE_TRUST Node CLI
 #[derive(Parser, Debug)]
@@ -203,8 +209,8 @@ fn run_validator(
     let rt = Runtime::new()?;
 
     rt.block_on(async {
-        // Initialize node core (chain, consensus, tx pool, etc.)
-        let _node = node_core::NodeCore::new(data_dir, true)?;
+        // Initialize node core (chain, consensus, tx pool, private ledger, etc.)
+        let node = Arc::new(NodeCore::new(data_dir, true)?);
 
         // Load or generate validator keys (Falcon-512)
         let (falcon_pk, falcon_sk) = if let Some(ks) = keystore {
@@ -216,6 +222,9 @@ fn run_validator(
             falcon_sigs::falcon_keypair()
         };
 
+        // (falcon_sk na razie nieużywany w main – realnie pójdzie do konsensusu / signing service)
+        let _ = falcon_sk;
+
         // Consensus NodeId (for PRO consensus, golden trio, etc.)
         let node_id = node_id::node_id_from_falcon_pk(&falcon_pk);
         println!("📍 Consensus Node ID (Falcon-based): {}", hex::encode(&node_id));
@@ -223,6 +232,18 @@ fn run_validator(
         // P2P identity (Falcon + Kyber + fingerprint) – separate from consensus logic
         let p2p_identity = SecureNodeIdentity::generate();
         println!("🌐 P2P identity generated (SecureNodeIdentity)");
+
+        // Start Secure PQ RPC server (Falcon+Kyber handshake, XChaCha20 channel)
+        {
+            let rpc_identity = p2p_identity.clone();
+            let rpc_node = node.clone();
+            tokio::spawn(async move {
+                let server = SecureRpcServer::new(rpc_port, rpc_identity, true, rpc_node);
+                if let Err(e) = server.start().await {
+                    eprintln!("❌ RPC server error: {e}");
+                }
+            });
+        }
 
         // Start P2P network
         println!("🌐 Starting P2P network on port {}...", p2p_port);
@@ -233,8 +254,6 @@ fn run_validator(
         consensus.register_validator(node_id, stake);
         consensus.record_quality_f64(&node_id, 1.0); // Start with perfect quality
         consensus.update_all_trust();
-
-        // TODO: Hook consensus + NodeCore + P2P + RPC together
 
         println!("✅ Validator node started successfully!");
         println!("⏳ Running... Press Ctrl+C to stop");
@@ -260,18 +279,28 @@ fn run_full_node(data_dir: PathBuf, p2p_port: u16, rpc_port: u16) -> Result<()> 
     let rt = Runtime::new()?;
 
     rt.block_on(async {
-        // Initialize node core (chain, tx pool, etc.)
-        let _node = node_core::NodeCore::new(data_dir, false)?;
+        // Initialize node core (chain, tx pool, ledger, etc.)
+        let node = Arc::new(NodeCore::new(data_dir, false)?);
 
         // Generate secure P2P identity (Falcon + Kyber)
         let p2p_identity = SecureNodeIdentity::generate();
         println!("🌐 P2P identity generated (SecureNodeIdentity)");
 
+        // Start Secure PQ RPC server (read-only / non-validator)
+        {
+            let rpc_identity = p2p_identity.clone();
+            let rpc_node = node.clone();
+            tokio::spawn(async move {
+                let server = SecureRpcServer::new(rpc_port, rpc_identity, false, rpc_node);
+                if let Err(e) = server.start().await {
+                    eprintln!("❌ RPC server error: {e}");
+                }
+            });
+        }
+
         // Start P2P network
         println!("🌐 Starting P2P network on port {}...", p2p_port);
         let _p2p = Arc::new(p2p::P2PNetwork::new(p2p_port, p2p_identity).await?);
-
-        // TODO: Start RPC server on rpc_port and hook into NodeCore
 
         println!("✅ Full node started successfully!");
         println!("⏳ Running... Press Ctrl+C to stop");
@@ -291,6 +320,9 @@ fn init_genesis(output: PathBuf, chain_id: String, validators: Option<PathBuf>) 
     use serde_json::json;
 
     println!("🌟 Initializing new genesis for chain: {}", chain_id);
+
+    // (validators jeszcze nieużywani – placeholder na przyszłość)
+    let _ = validators;
 
     // Create genesis configuration
     let genesis = json!({
@@ -398,7 +430,6 @@ fn run_benchmarks(filter: Option<String>) -> Result<()> {
         let (pk, sk) = falcon_sigs::falcon_keypair();
         let keygen_time = start.elapsed();
 
-        let msg = b"benchmark message";
         let start = Instant::now();
         let sig = falcon_sigs::falcon_sign_nullifier(&[0u8; 32], &sk)?;
         let sign_time = start.elapsed();
@@ -431,6 +462,12 @@ fn run_benchmarks(filter: Option<String>) -> Result<()> {
         let ss2 = kyber_kem::kyber_decapsulate(&ct, &sk)?;
         let decap_time = start.elapsed();
 
+        // sanity – żeby kompilator nie marudził o nieużywanej zmiennej
+        assert_eq!(
+            KemSharedSecret::as_bytes(&ss1),
+            KemSharedSecret::as_bytes(&ss2)
+        );
+
         println!("  Key generation: {:?}", keygen_time);
         println!("  Encapsulation: {:?}", encap_time);
         println!("  Decapsulation: {:?}", decap_time);
@@ -445,7 +482,7 @@ fn run_benchmarks(filter: Option<String>) -> Result<()> {
 
     // Benchmark KMAC256
     if filter.as_ref().map_or(true, |f| f.contains("kmac")) {
-        use crypto::kmac;
+        use crate::crypto::kmac;
 
         println!("=== KMAC256 ===");
 
@@ -463,6 +500,7 @@ fn run_benchmarks(filter: Option<String>) -> Result<()> {
         println!("  Tag (1KB): {:?}", tag_time);
         println!("  Key derivation: {:?}", derive_time);
         println!("  Tag size: {} bytes", tag.len());
+        println!("  Derived key size: {} bytes", derived.len());
         println!();
     }
 
@@ -482,7 +520,6 @@ fn run_benchmarks(filter: Option<String>) -> Result<()> {
 
             let mut rng = rand::thread_rng();
 
-            // Przykładowa wartość
             let value: u64 = 42;
             let mut blinding = [0u8; 32];
             let mut recipient = [0u8; 32];
@@ -492,26 +529,33 @@ fn run_benchmarks(filter: Option<String>) -> Result<()> {
             let witness = Witness::new(value, blinding, recipient);
             let opts = default_proof_options();
 
+            // PROVE – używamy dokładnie tych public inputs,
+            // które prover wyciągnie z trace (get_pub_inputs)
             let start = Instant::now();
-            let (proof, mut pub_inputs) =
-                prove_range_with_poseidon(witness.clone(), 64, opts);
+            let (proof, pub_inputs) =
+                prove_range_with_poseidon(witness, 64, opts);
             let prove_time = start.elapsed();
 
-            // Dopinamy recipient do public inputs (tak jak w testach)
-            pub_inputs.recipient = witness.recipient;
-
+            // VERIFY – zero modyfikacji pub_inputs
             let start = Instant::now();
             let ok = verify_range_with_poseidon(proof, pub_inputs);
             let verify_time = start.elapsed();
 
             println!("  value: {}", value);
             println!("  prove:   {:?}", prove_time);
-            println!("  verify: {:?}", verify_time);
+            println!("  verify:  {:?}", verify_time);
             println!("  verified: {}", ok);
             println!();
         }
+
+        #[cfg(not(feature = "winterfell_v2"))]
+        {
+            println!("=== Winterfell STARK range proof ===");
+            println!("  (disabled: compiled without `winterfell_v2` feature)");
+            println!();
+        }
     }
-    
+
     Ok(())
 }
 

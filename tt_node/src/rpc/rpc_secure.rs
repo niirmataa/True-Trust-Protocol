@@ -26,7 +26,6 @@ use crate::p2p::secure::{
 };
 use crate::p2p::channel::SecureChannel;
 use crate::tx_stark::SignedStarkTx;
-
 /* ============================================================================ */
 /* Security constants                                                           */
 /* ============================================================================ */
@@ -154,6 +153,7 @@ pub enum RpcRequest {
     SubscribeEvents { filter: EventFilter },
     UnsubscribeEvents { subscription_id: String },
     GetBalance { address_hex: String },
+    /// Nowy endpoint: STARK + PQ podpis
     SubmitSignedStarkTx { tx_hex: String },
 }
 
@@ -228,6 +228,7 @@ pub enum RpcResponse {
         confirmed: u128,
         pending: u128,
     },
+    /// Odpowiedź dla SubmitSignedStarkTx
     StarkTxSubmitted {
         tx_id: String,
         accepted: bool,
@@ -706,6 +707,7 @@ impl SecureRpcServer {
         }
     }
 }
+
 /* ============================================================================ */
 /* Client                                                                       */
 /* ============================================================================ */
@@ -949,9 +951,9 @@ pub fn create_secure_rpc_identity() -> Result<NodeIdentity> {
     Ok(NodeIdentity::from_keys(falcon_pk, falcon_sk, kyber_pk, kyber_sk))
 }
 
-// ============================================================================
-// Background tasks (session cleanup, key rotation)
-// ============================================================================
+/* ============================================================================ */
+/* Background tasks (session cleanup, key rotation)                             */
+/* ============================================================================ */
 
 async fn cleanup_sessions_task(server: Arc<SecureRpcServer>) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));

@@ -43,6 +43,11 @@ use sharks::{Sharks, Share};
 
 // Nasze KMAC / KDF
 use crate::crypto::kmac as ck;
+use std::net::SocketAddr;
+
+// PQ secure RPC client
+use crate::rpc::{SecureRpcClient, RpcRequest, RpcResponse};
+use crate::p2p::secure::NodeIdentity;
 
 /* =========================================================================================
  * CONSTANTS
@@ -178,6 +183,15 @@ enum Cmd {
         pepper: PepperFlag,
         #[arg(long, default_value_t = 1024)]
         pad_block: u16,
+    },
+    /// 🔍 Sprawdź balans przez PQ-secure RPC
+    WalletBalance {
+        /// Plik portfela (martin.dat, itd.)
+        #[arg(long)]
+        file: PathBuf,
+        /// Adres RPC noda (host:port)
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        rpc: String,
     },
 }
 
@@ -1211,6 +1225,68 @@ fn cmd_shards_recover(
     Ok(())
 }
 
+fn cmd_wallet_balance(path: PathBuf, rpc: String) -> Result<()> {
+    // 1. Wczytaj klucze z portfela (pyta o hasło)
+    let (ks, _hdr) = load_keyset(path)?;
+    let addr_ttq = bech32_addr_quantum_short(&ks.falcon_pk, &ks.mlkem_pk)?;
+    let raw = raw_addr_from_keys(&ks.falcon_pk, &ks.mlkem_pk);
+    let addr_hex = hex::encode(raw);
+
+    // 2. Zbuduj PQ tożsamość klienta z kluczy portfela
+    let id = NodeIdentity::from_keys(
+        ks.falcon_pk.clone(),
+        ks.falcon_sk.clone(),
+        ks.mlkem_pk.clone(),
+        ks.mlkem_sk.clone(),
+    );
+
+    // 3. Sparsuj adres RPC
+    let server_addr: SocketAddr = rpc
+        .parse()
+        .map_err(|e| anyhow!("Invalid --rpc address '{}': {}", rpc, e))?;
+
+    // 4. Mały runtime Tokio tylko na to jedno połączenie
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let mut client = SecureRpcClient::new(server_addr, id);
+        client.connect().await?;
+
+        let resp = client
+            .request(RpcRequest::GetBalance {
+                address_hex: addr_hex.clone(),
+            })
+            .await?;
+
+        match resp {
+            RpcResponse::Balance {
+                address_hex,
+                confirmed,
+                pending,
+            } => {
+                println!("address(ttq): {}", addr_ttq);
+                println!("address_hex : {}", address_hex);
+                println!("confirmed   : {}", confirmed);
+                println!("pending     : {}", pending);
+            }
+            RpcResponse::Error { code, message, data } => {
+                eprintln!("RPC error {}: {}", code, message);
+                if let Some(d) = data {
+                    eprintln!("  data: {}", d);
+                }
+            }
+            other => {
+                eprintln!("Unexpected RPC response: {:?}", other);
+            }
+        }
+
+        client.close().await?;
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    Ok(())
+}
+
+
 /* =========================================================================================
  * MAIN ENTRY POINT
  * ====================================================================================== */
@@ -1257,6 +1333,11 @@ pub fn run_cli() -> Result<()> {
             pepper,
             pad_block,
         } => cmd_shards_recover(input, out, argon2, aead, pepper, pad_block),
+
+        Cmd::WalletBalance { 
+            file, 
+            rpc 
+        } => cmd_wallet_balance(file, rpc),
     }
 }
 

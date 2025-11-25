@@ -1,10 +1,12 @@
-//! Secure PQ-aware RPC module
-//!
-//! Exposes node status, consensus monitoring, and transaction submission
-//! over a Post-Quantum secure channel using the P2P protocol.
+#![forbid(unsafe_code)]
 
-pub mod rpc_server;
+// Stary/nowszy kod z SecureRpcServer / SecureRpcClient
 pub mod rpc_secure;
 
-pub use rpc_server::RpcServer;
-pub use rpc_secure::SecureRpcServer;
+// Re-exporty, żeby można było pisać crate::rpc::{...}
+pub use rpc_secure::{
+    SecureRpcServer,
+    SecureRpcClient,
+    RpcRequest,
+    RpcResponse,
+};

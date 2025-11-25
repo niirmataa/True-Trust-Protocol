@@ -154,6 +154,18 @@ pub fn verify_batch_spend_authorization<C: PqcVerificationContext>(
     Ok(())
 }
 
+/// Jedna prywatna nota, którą node może wystawić po RPC dla portfela.
+///
+/// - `nullifier`: identyfikator noty
+/// - `meta`: metadane (commitment, pqc fingerprint, timestamp, opcjonalne PK)
+/// - `enc_hint`: nieprzezroczysty PQ hint (np. Kyber ciphertext albo blob app-owy)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PrivateNoteEntry {
+    pub nullifier: Hash32,
+    pub meta: NoteMetadata,
+    pub enc_hint: Vec<u8>,
+}
+
 /* ============================================================================
  * Backward Compatibility (Classical Notes)
  * ========================================================================== */
