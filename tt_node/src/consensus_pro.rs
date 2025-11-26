@@ -29,6 +29,12 @@ pub type ValidatorId = NodeId;
 /// This is what you store in state (e.g. number of TT-coins bonded).
 pub type StakeRaw = u128;
 
+/// Maximum stake per validator (prevents centralization)
+pub const MAX_STAKE_PER_VALIDATOR: StakeRaw = 1_000_000_000; // 1 billion tokens
+
+/// Maximum total stake across all validators (prevents overflow)
+pub const MAX_TOTAL_STAKE: StakeRaw = 10_000_000_000; // 10 billion tokens
+
 /// Validator state in PRO consensus.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorState {
@@ -77,33 +83,65 @@ impl ConsensusPro {
 
     /// Registers new validator with initial stake.
     ///
-    /// Note: we don't check any economic rules here – that's for "staking" layer.
-    pub fn register_validator(&mut self, id: ValidatorId, stake_raw: StakeRaw) {
+    /// Returns `Ok(())` on success, or an error if stake limits are exceeded.
+    ///
+    /// # Errors
+    /// - Stake exceeds `MAX_STAKE_PER_VALIDATOR`
+    /// - Total stake would exceed `MAX_TOTAL_STAKE`
+    pub fn register_validator(&mut self, id: ValidatorId, stake_raw: StakeRaw) -> Result<(), &'static str> {
+        // Check per-validator limit
+        if stake_raw > MAX_STAKE_PER_VALIDATOR {
+            return Err("Stake exceeds per-validator maximum");
+        }
+
+        // Calculate what the new total stake would be
+        let delta = if let Some(v) = self.validators.get(&id) {
+            // Re-registering: calculate delta
+            if stake_raw > v.stake_raw {
+                stake_raw - v.stake_raw
+            } else {
+                0 // No increase
+            }
+        } else {
+            // New validator: entire stake is delta
+            stake_raw
+        };
+
+        // Check total stake limit with overflow protection
+        let new_total = self.total_stake_raw
+            .checked_add(delta)
+            .ok_or("Total stake overflow")?;
+
+        if new_total > MAX_TOTAL_STAKE {
+            return Err("Total stake exceeds maximum");
+        }
+
+        // All checks passed, proceed with registration
         if self.validators.contains_key(&id) {
-            // re-register → only update stake_raw, rest stays
+            // Re-register → only update stake_raw, rest stays
             let v = self.validators.get_mut(&id).unwrap();
-            // update total_stake_raw
             self.total_stake_raw = self
                 .total_stake_raw
                 .saturating_sub(v.stake_raw)
                 .saturating_add(stake_raw);
             v.stake_raw = stake_raw;
             // stake_q will be recalculated in `recompute_all_stake_q`
-            return;
+        } else {
+            // New validator
+            self.total_stake_raw = new_total;
+
+            let state = ValidatorState {
+                id,
+                stake_raw,
+                stake_q: 0,
+                quality_q: 0,
+                trust_q: 0,
+            };
+
+            self.validators.insert(id, state);
         }
 
-        self.total_stake_raw = self.total_stake_raw.saturating_add(stake_raw);
-
-        // stake_q computed at normalization, quality/trust start at 0
-        let state = ValidatorState {
-            id,
-            stake_raw,
-            stake_q: 0,
-            quality_q: 0,
-            trust_q: 0,
-        };
-
-        self.validators.insert(id, state);
+        Ok(())
     }
 
     /// Removes validator (e.g. after unbonding / slashing).
@@ -269,8 +307,8 @@ mod tests {
         let a = mk_id(1);
         let b = mk_id(2);
 
-        c.register_validator(a, 100);
-        c.register_validator(b, 300);
+        c.register_validator(a, 100).unwrap();
+        c.register_validator(b, 300).unwrap();
 
         c.recompute_all_stake_q();
 
@@ -292,8 +330,8 @@ mod tests {
         let a = mk_id(1);
         let b = mk_id(2);
 
-        c.register_validator(a, 100);
-        c.register_validator(b, 100);
+        c.register_validator(a, 100).unwrap();
+        c.register_validator(b, 100).unwrap();
 
         c.recompute_all_stake_q();
 
@@ -321,8 +359,8 @@ mod tests {
         let a = mk_id(1);
         let b = mk_id(2);
 
-        c.register_validator(a, 1000);
-        c.register_validator(b, 1000);
+        c.register_validator(a, 1000).unwrap();
+        c.register_validator(b, 1000).unwrap();
 
         c.recompute_all_stake_q();
 
@@ -344,7 +382,7 @@ mod tests {
     fn zero_total_stake_results_in_zero_stake_q() {
         let mut c = ConsensusPro::new_default();
         let a = mk_id(1);
-        c.register_validator(a, 0);
+        c.register_validator(a, 0).unwrap();
         c.recompute_all_stake_q();
         let v = c.get_validator(&a).unwrap();
         assert_eq!(v.stake_q, 0);
@@ -356,8 +394,8 @@ mod tests {
         let a = mk_id(1);
         let b = mk_id(2);
 
-        c.register_validator(a, 100);
-        c.register_validator(b, 100);
+        c.register_validator(a, 100).unwrap();
+        c.register_validator(b, 100).unwrap();
 
         c.recompute_all_stake_q();
 
@@ -367,5 +405,35 @@ mod tests {
         // 100 / 200 = 0.5 dla obu
         assert_eq!(va.stake_q, vb.stake_q);
         assert!(va.stake_q <= ONE_Q);
+    }
+
+    #[test]
+    fn stake_limits_enforced() {
+        let mut c = ConsensusPro::new_default();
+        let a = mk_id(1);
+
+        // Test per-validator limit
+        let result = c.register_validator(a, MAX_STAKE_PER_VALIDATOR + 1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Stake exceeds per-validator maximum");
+
+        // Valid stake should work
+        c.register_validator(a, MAX_STAKE_PER_VALIDATOR).unwrap();
+    }
+
+    #[test]
+    fn total_stake_limit_enforced() {
+        let mut c = ConsensusPro::new_default();
+
+        // Register validators up to the limit
+        let stake_per_validator = MAX_TOTAL_STAKE / 10;
+        for i in 0..10 {
+            c.register_validator(mk_id(i as u8), stake_per_validator).unwrap();
+        }
+
+        // Adding one more should fail
+        let result = c.register_validator(mk_id(100), 1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Total stake exceeds maximum");
     }
 }

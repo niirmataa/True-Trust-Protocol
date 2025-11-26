@@ -40,6 +40,12 @@ pub type QualityScore = Q;
 /// Epoch number
 pub type Epoch = u64;
 
+/// Maximum vouches per validator (prevents memory DoS)
+pub const MAX_VOUCHES_PER_VALIDATOR: usize = 100;
+
+/// Vouch expiry in epochs (removes old vouches)
+pub const VOUCH_EXPIRY_EPOCHS: u64 = 1000;
+
 /// Convert f64 → Q (ONLY for helpers, e.g. defaults / tests)
 #[inline]
 pub fn q_from_f64(x: f64) -> Q {
@@ -202,23 +208,45 @@ impl TrustGraph {
         self.history_h.insert(validator, qclamp01(h_new));
     }
 
-    /// Add vouching edge
+    /// Add vouching edge with expiry and limit checks
     ///
     /// Rules:
     /// - voucher must have trust ≥ min_trust_to_vouch
     /// - strength ≤ trust(voucher)
-    pub fn add_vouch(&mut self, vouch: Vouch) -> bool {
+    /// - max `MAX_VOUCHES_PER_VALIDATOR` vouches per validator
+    /// - removes vouches older than `VOUCH_EXPIRY_EPOCHS`
+    ///
+    /// # Arguments
+    /// - `vouch`: The vouch to add
+    /// - `current_epoch`: Current epoch (for expiry cleanup)
+    pub fn add_vouch(&mut self, vouch: Vouch, current_epoch: Epoch) -> Result<(), &'static str> {
+        // Cleanup expired vouches first
+        self.vouches.retain(|_, v| {
+            current_epoch.saturating_sub(v.created_at) < VOUCH_EXPIRY_EPOCHS
+        });
+
+        // Check voucher trust
         let voucher_trust = self.get_trust(&vouch.voucher);
         if voucher_trust < self.config.min_trust_to_vouch {
-            return false;
+            return Err("Voucher trust below minimum");
         }
         if vouch.strength > voucher_trust {
-            return false;
+            return Err("Vouch strength exceeds voucher trust");
         }
 
+        // Check per-validator limit
+        let count = self.vouches.values()
+            .filter(|v| v.vouchee == vouch.vouchee)
+            .count();
+
+        if count >= MAX_VOUCHES_PER_VALIDATOR {
+            return Err("Too many vouches for validator");
+        }
+
+        // All checks passed, add vouch
         let key = (vouch.voucher, vouch.vouchee);
         self.vouches.insert(key, vouch);
-        true
+        Ok(())
     }
 
     /// Remove vouching edge
@@ -367,20 +395,22 @@ impl TrustGraph {
 /// Bootstrap new validator with vouching.
 ///
 /// `vouchers`: list of (voucher, strength) in Q.
+/// `current_epoch`: Current epoch for vouch expiry tracking.
 /// Returns initial trust of new validator.
 pub fn bootstrap_validator(
     graph: &mut TrustGraph,
     new_validator: NodeId,
     vouchers: Vec<(NodeId, Q)>,
+    current_epoch: Epoch,
 ) -> TrustScore {
     for (voucher, strength) in vouchers {
         let vouch = Vouch {
             voucher,
             vouchee: new_validator,
             strength: qclamp01(strength),
-            created_at: 0,
+            created_at: current_epoch,
         };
-        let _ = graph.add_vouch(vouch);
+        let _ = graph.add_vouch(vouch, current_epoch);
     }
 
     graph.update_trust(new_validator)
