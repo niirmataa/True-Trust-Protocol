@@ -1,5 +1,15 @@
 # TRUE-TRUST-PROTOCOL 🔐
 
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org)
+[![GitHub stars](https://img.shields.io/github/stars/niirmataa/True-Trust-Protocol.svg?style=social&label=Star)](https://github.com/niirmataa/True-Trust-Protocol)
+[![GitHub forks](https://img.shields.io/github/forks/niirmataa/True-Trust-Protocol.svg?style=social&label=Fork)](https://github.com/niirmataa/True-Trust-Protocol)
+[![GitHub issues](https://img.shields.io/github/issues/niirmataa/True-Trust-Protocol.svg)](https://github.com/niirmataa/True-Trust-Protocol/issues)
+[![GitHub last commit](https://img.shields.io/github/last-commit/niirmataa/True-Trust-Protocol.svg)](https://github.com/niirmataa/True-Trust-Protocol/commits/main)
+[![Lines of Code](https://img.shields.io/tokei/lines/github/niirmataa/True-Trust-Protocol)](https://github.com/niirmataa/True-Trust-Protocol)
+[![Security: Post-Quantum](https://img.shields.io/badge/security-post--quantum-green.svg)](https://csrc.nist.gov/projects/post-quantum-cryptography)
+[![Code Size](https://img.shields.io/github/languages/code-size/niirmataa/True-Trust-Protocol.svg)](https://github.com/niirmataa/True-Trust-Protocol)
+
 Post-quantum secure blockchain with deterministic consensus, STARK proofs, and advanced cryptographic primitives.
 
 ## 🌟 Key Features
