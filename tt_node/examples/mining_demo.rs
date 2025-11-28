@@ -9,12 +9,12 @@
 //! 6. Submit to consensus
 //! 7. Distribute rewards
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, Context};
 use std::time::Instant;
 use serde::{Serialize, Deserialize};
 
 // Import tt_node modules
-use tt_node::randomx_full::{RandomXHasher, mine_randomx};
+use tt_node::randomx_pow::{RandomXEngine, RandomXConfig, mine};
 use tt_node::falcon_sigs::falcon_keypair;
 use tt_node::consensus_pro::ConsensusPro;
 use tt_node::node_id::node_id_from_falcon_pk;
@@ -73,33 +73,31 @@ struct MiningConfig {
 
 impl Default for MiningConfig {
     fn default() -> Self {
-        // Easy target for demo: hash must be < target
-        // Target with 4 leading zero bytes = ~2^32 difficulty
+        // Target in LITTLE-ENDIAN format
+        // hash_less_than() compares from index 31 down to 0
+        // So leading zeros go at the END of the array
         let mut target = [0xFFu8; 32];
-        target[0] = 0x00;
-        target[1] = 0x00;
-        target[2] = 0x0F;  // Adjust for demo (easier)
+        target[31] = 0x00;  // Most significant byte
+        target[30] = 0x7F;  // ~2^15 difficulty (~32K hashes, fast for demo)
         
         Self {
             difficulty_target: target,
-            max_iterations: 10000, // Limit for demo
+            max_iterations: 1_000_000,
             epoch: 0,
         }
     }
 }
 
-/// Compute difficulty from target
+/// Compute difficulty from target (little-endian)
 fn compute_difficulty(target: &[u8; 32]) -> f64 {
-    // Difficulty = max_target / current_target
-    // Where max_target = 2^256 - 1
-    
-    // Approximate: count leading zero bits
+    // Little-endian: most significant bytes at END of array
+    // Count leading zero bits from the end (big-endian view)
     let mut leading_zeros = 0;
-    for byte in target.iter() {
-        if *byte == 0 {
+    for i in (0..32).rev() {
+        if target[i] == 0 {
             leading_zeros += 8;
         } else {
-            leading_zeros += byte.leading_zeros() as usize;
+            leading_zeros += target[i].leading_zeros() as usize;
             break;
         }
     }
@@ -109,26 +107,29 @@ fn compute_difficulty(target: &[u8; 32]) -> f64 {
 
 /// Main mining function
 fn mine_block(
-    hasher: &RandomXHasher,
+    hasher: &RandomXEngine,
     header: &mut BlockHeader,
     config: &MiningConfig,
 ) -> Result<MinedBlock> {
     println!("\n⛏️  MINING BLOCK #{}", header.height);
-    println!("Difficulty: ~{:.0} hashes", compute_difficulty(&config.difficulty_target));
-    println!("Target: {}", hex::encode(&config.difficulty_target[..8]));
+    println!("Difficulty: ~{:.0} expected hashes", compute_difficulty(&config.difficulty_target));
+    // Show target in human-readable big-endian form (MSB first)
+    let target_be: Vec<u8> = config.difficulty_target.iter().rev().cloned().collect();
+    println!("Target (BE): {}...", hex::encode(&target_be[..8]));
     
     // Serialize header without nonce
     let block_data = header.compute_hash_without_nonce();
     
     // Mine!
     let start = Instant::now();
-    let result = mine_randomx(
+    let result = mine(
         hasher,
         &block_data,
         &config.difficulty_target,
         config.max_iterations,
-    );
-    
+    )
+    .map_err(|e| anyhow!("RandomX mining failed: {:?}", e))?;
+
     match result {
         Some((nonce, pow_hash)) => {
             let elapsed = start.elapsed();
@@ -136,10 +137,20 @@ fn mine_block(
             
             println!("✅ Block mined in {:.2}s!", elapsed.as_secs_f64());
             println!("   Nonce: {}", nonce);
-            println!("   Hash: {}", hex::encode(&pow_hash[..8]));
+            // Show hash in big-endian form too
+            let hash_be: Vec<u8> = pow_hash.iter().rev().cloned().collect();
+            println!("   Hash (BE): {}...", hex::encode(&hash_be[..16]));
             
-            let hashrate = (nonce as f64) / elapsed.as_secs_f64();
-            println!("   Avg hashrate: {:.1} H/s", hashrate);
+            // Calculate hashrate properly
+            let hashes_done = if nonce == 0 { 1 } else { nonce as u64 };
+            let hashrate = (hashes_done as f64) / elapsed.as_secs_f64();
+            if hashrate > 1_000_000.0 {
+                println!("   Hashrate: {:.2} MH/s (~{} hashes)", hashrate / 1_000_000.0, hashes_done);
+            } else if hashrate > 1_000.0 {
+                println!("   Hashrate: {:.2} kH/s (~{} hashes)", hashrate / 1_000.0, hashes_done);
+            } else {
+                println!("   Hashrate: {:.1} H/s (~{} hashes)", hashrate, hashes_done);
+            }
             
             Ok(MinedBlock {
                 header: header.clone(),
@@ -156,7 +167,7 @@ fn mine_block(
 
 /// Verify mined block
 fn verify_block(
-    hasher: &RandomXHasher,
+    hasher: &RandomXEngine,
     block: &MinedBlock,
     target: &[u8; 32],
 ) -> Result<()> {
@@ -171,7 +182,7 @@ fn verify_block(
     
     // Verify PoW
     let start = Instant::now();
-    let computed_hash = hasher.hash(&input);
+    let computed_hash = hasher.hash(&input).map_err(|e| anyhow!("RandomX hash failed: {:?}", e))?;
     let verify_time = start.elapsed();
     
     // Check hash matches
@@ -185,7 +196,8 @@ fn verify_block(
     }
     
     println!("✅ PoW verified in {:?}", verify_time);
-    println!("   Hash: {}", hex::encode(&computed_hash[..8]));
+    let hash_be: Vec<u8> = computed_hash.iter().rev().cloned().collect();
+    println!("   Hash (BE): {}...", hex::encode(&hash_be[..16]));
     
     Ok(())
 }
@@ -211,7 +223,12 @@ fn run_mining_simulation() -> Result<()> {
     println!("\n🔄 STEP 1: Initializing RandomX Dataset (2GB)");
     println!("This will take ~30-60 seconds...");
     let config = MiningConfig::default();
-    let hasher = RandomXHasher::new(config.epoch);
+    // Derive per-epoch 32-byte key using KMAC
+    let epoch_bytes = config.epoch.to_le_bytes();
+    let key = kmac::kmac256_derive_key(&[0u8; 32], b"RANDOMX_KEY", &epoch_bytes);
+    let rx_cfg = RandomXConfig::default();
+    let hasher = RandomXEngine::new_fast(&key, rx_cfg)
+        .map_err(|e| anyhow!("RandomX init failed: {:?}", e))?;
     println!("✅ RandomX ready!");
     
     // Step 2: Setup validators and consensus
@@ -289,32 +306,57 @@ fn run_mining_simulation() -> Result<()> {
     println!("\n💰 STEP 4: Distributing rewards");
     
     let total_reward_per_block = 100_000_u128; // 100k TT per block
-    println!("Total reward per block: {} TT", total_reward_per_block);
+    let leader_share_pct = 40; // Leader gets 40%, rest proportional to validators
+    let validator_pool_pct = 60; // 60% distributed to all validators by weight
+    
+    println!("Reward model:");
+    println!("  • Total per block: {} TT", total_reward_per_block);
+    println!("  • Leader bonus: {}% ({} TT)", leader_share_pct, total_reward_per_block * leader_share_pct / 100);
+    println!("  • Validator pool: {}% ({} TT) - distributed by weight", 
+             validator_pool_pct, total_reward_per_block * validator_pool_pct / 100);
     println!();
+    
+    // Calculate total weight once
+    let total_weight: u128 = validator_keys.iter()
+        .map(|(_, id, _, _)| consensus.compute_validator_weight(id).unwrap_or(0))
+        .sum();
     
     for (i, block) in mined_blocks.iter().enumerate() {
         let block_height = block.header.height;
-        let validator_id = block.header.validator_id;
+        let leader_id = block.header.validator_id;
         
-        let validator_name = validator_keys.iter()
-            .find(|(_, id, _, _)| *id == validator_id)
+        let leader_name = validator_keys.iter()
+            .find(|(_, id, _, _)| *id == leader_id)
             .map(|(name, _, _, _)| *name)
             .unwrap_or("Unknown");
         
-        // Calculate reward based on validator weight
-        let weight = consensus.compute_validator_weight(&validator_id).unwrap_or(0);
-        let total_weight: u128 = validator_keys.iter()
-            .map(|(_, id, _, _)| consensus.compute_validator_weight(id).unwrap_or(0))
-            .sum();
+        println!("─── Block {} (Leader: {}) ───", block_height, leader_name);
         
-        let reward = if total_weight > 0 {
-            (total_reward_per_block * weight) / total_weight
-        } else {
-            0
-        };
+        let leader_bonus = total_reward_per_block * leader_share_pct / 100;
+        let validator_pool = total_reward_per_block * validator_pool_pct / 100;
         
-        println!("Block {}: {} receives {} TT (weight: {})", 
-                 block_height, validator_name, reward, weight);
+        // Distribute to all validators by weight
+        for (name, id, _, _) in &validator_keys {
+            let weight = consensus.compute_validator_weight(id).unwrap_or(0);
+            let pool_share = if total_weight > 0 {
+                (validator_pool * weight) / total_weight
+            } else {
+                0
+            };
+            
+            let bonus = if *id == leader_id { leader_bonus } else { 0 };
+            let total_reward = pool_share + bonus;
+            let pct = if total_weight > 0 { (weight as f64 / total_weight as f64) * 100.0 } else { 0.0 };
+            
+            if bonus > 0 {
+                println!("  {} receives {} TT ({} pool + {} leader bonus) [{:.1}% weight]",
+                         name, total_reward, pool_share, bonus, pct);
+            } else {
+                println!("  {} receives {} TT (pool share) [{:.1}% weight]",
+                         name, pool_share, pct);
+            }
+        }
+        println!();
     }
     
     // Step 5: Final statistics

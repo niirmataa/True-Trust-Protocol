@@ -8,6 +8,9 @@
 //! - Demo mode: Run demonstrations and examples
 
 #![forbid(unsafe_code)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
 
 use anyhow::{anyhow, Result};
 use pqcrypto_traits::sign::PublicKey as SignPublicKey;
@@ -48,6 +51,10 @@ mod randomx_pow;
 mod rpc;
 mod stealth_pq;
 mod simple_pq_tx;
+mod key_registry;
+mod tx_compression;
+mod stealth_registry;
+mod private_stark_tx;
 
 #[cfg(feature = "wallet")]
 pub mod wallet;
@@ -138,6 +145,22 @@ enum Command {
         /// Specific benchmark to run
         #[arg(long)]
         filter: Option<String>,
+
+        /// Number of iterations for STARK benchmarks
+        #[arg(long, default_value_t = 3)]
+        stark_iterations: usize,
+
+        /// Comma-separated list of `num_bits` for STARK benchmark (e.g. "64,128")
+        #[arg(long)]
+        stark_sizes: Option<String>,
+
+        /// Output file path for benchmark results
+        #[arg(long)]
+        stark_output: Option<PathBuf>,
+
+        /// Output format: none|csv|json
+        #[arg(long, default_value = "none")]
+        stark_output_format: String,
     },
 
     /// Test all features
@@ -183,7 +206,9 @@ fn main() -> Result<()> {
             run_consensus_demo(validators, rounds)
         }
 
-        Command::Benchmark { filter } => run_benchmarks(filter),
+        Command::Benchmark { filter, stark_iterations, stark_sizes, stark_output, stark_output_format } => {
+            run_benchmarks(filter, stark_iterations, stark_sizes, stark_output, stark_output_format)
+        }
 
         Command::TestAll => run_test_all(),
 
@@ -413,8 +438,18 @@ fn run_consensus_demo(validators: u32, rounds: u32) -> Result<()> {
 }
 
 /// Run crypto benchmarks
-fn run_benchmarks(filter: Option<String>) -> Result<()> {
+fn run_benchmarks(
+    filter: Option<String>,
+    stark_iterations: usize,
+    stark_sizes: Option<String>,
+    stark_output: Option<PathBuf>,
+    stark_output_format: String,
+) -> Result<()> {
     use std::time::Instant;
+    use serde::Serialize;
+    use std::fs::File;
+    use std::io::Write;
+    use crate::crypto::poseidon_params::TOTAL_ROUNDS;
 
     println!("🏃 Running Crypto Benchmarks");
     if let Some(f) = &filter {
@@ -519,33 +554,117 @@ fn run_benchmarks(filter: Option<String>) -> Result<()> {
             println!("=== Winterfell STARK range proof ===");
 
             let mut rng = rand::thread_rng();
+            // Parametry benchmarku: lista rozmiarów i liczba iteracji (z CLI)
+            // Only use sizes compatible with our witness (u64) and the AIR; 64 is tested.
+            let sizes: Vec<usize> = if let Some(s) = stark_sizes {
+                s.split(',')
+                    .filter_map(|x| x.trim().parse::<usize>().ok())
+                    .collect()
+            } else {
+                vec![64usize]
+            };
 
-            let value: u64 = 42;
-            let mut blinding = [0u8; 32];
-            let mut recipient = [0u8; 32];
-            rng.fill_bytes(&mut blinding);
-            rng.fill_bytes(&mut recipient);
+            let iterations = stark_iterations.max(1);
 
-            let witness = Witness::new(value, blinding, recipient);
-            let opts = default_proof_options();
+            #[derive(Serialize)]
+            struct Record {
+                num_bits: usize,
+                iteration: usize,
+                prove_ms: f64,
+                verify_ms: f64,
+                verified: bool,
+                proof_size_bytes: usize,
+                trace_len: usize,
+            }
 
-            // PROVE – używamy dokładnie tych public inputs,
-            // które prover wyciągnie z trace (get_pub_inputs)
-            let start = Instant::now();
-            let (proof, pub_inputs) =
-                prove_range_with_poseidon(witness, 64, opts);
-            let prove_time = start.elapsed();
+            let mut records: Vec<Record> = Vec::new();
 
-            // VERIFY – zero modyfikacji pub_inputs
-            let start = Instant::now();
-            let ok = verify_range_with_poseidon(proof, pub_inputs);
-            let verify_time = start.elapsed();
+            for &num_bits in &sizes {
+                println!("-- num_bits = {} ({} iterations)", num_bits, iterations);
 
-            println!("  value: {}", value);
-            println!("  prove:   {:?}", prove_time);
-            println!("  verify:  {:?}", verify_time);
-            println!("  verified: {}", ok);
-            println!();
+                let mut total_prove = std::time::Duration::ZERO;
+                let mut total_verify = std::time::Duration::ZERO;
+                let mut last_proof_size: Option<usize> = None;
+
+                for i in 0..iterations {
+                    let value: u128 = 42u128;
+                    let mut blinding = [0u8; 32];
+                    let mut recipient = [0u8; 32];
+                    rng.fill_bytes(&mut blinding);
+                    rng.fill_bytes(&mut recipient);
+
+                    let witness = Witness::new(value, blinding, recipient);
+                    let opts = default_proof_options();
+
+                    // PROVE
+                    let start = Instant::now();
+                    let (proof, pub_inputs) = prove_range_with_poseidon(witness, num_bits, opts);
+                    let prove_time = start.elapsed();
+                    total_prove += prove_time;
+
+                    // measure proof size if possible
+                    let proof_bytes = proof.to_bytes();
+                    last_proof_size = Some(proof_bytes.len());
+
+                    // VERIFY
+                    let start = Instant::now();
+                    let ok = verify_range_with_poseidon(proof, pub_inputs);
+                    let verify_time = start.elapsed();
+                    total_verify += verify_time;
+                    println!("  iter {}: prove={:?}, verify={:?}, verified={}", i + 1, prove_time, verify_time, ok);
+
+                    // compute trace length estimate using prover constants
+                    let range_rows = num_bits + 1;
+                    let base_rows = range_rows + TOTAL_ROUNDS + 1;
+                    let trace_len = base_rows.next_power_of_two();
+
+                    records.push(Record {
+                        num_bits,
+                        iteration: i + 1,
+                        prove_ms: (prove_time.as_secs_f64() * 1000.0),
+                        verify_ms: (verify_time.as_secs_f64() * 1000.0),
+                        verified: ok,
+                        proof_size_bytes: proof_bytes.len(),
+                        trace_len,
+                    });
+                }
+
+                let avg_prove = total_prove / (iterations as u32);
+                let avg_verify = total_verify / (iterations as u32);
+
+                println!("  avg prove:  {:?}", avg_prove);
+                println!("  avg verify: {:?}", avg_verify);
+                if let Some(sz) = last_proof_size {
+                    println!("  last proof size (bytes): {}", sz);
+                }
+
+                println!();
+            }
+
+            // If output requested, write CSV or JSON
+            if let Some(path) = stark_output {
+                let fmt = stark_output_format.to_lowercase();
+                if fmt == "csv" {
+                    let mut f = File::create(&path)?;
+                    // header
+                    writeln!(f, "num_bits,iteration,prove_ms,verify_ms,verified,proof_size_bytes,trace_len")?;
+                    for r in &records {
+                        writeln!(
+                            f,
+                            "{},{},{:.6},{:.6},{},{},{}",
+                            r.num_bits, r.iteration, r.prove_ms, r.verify_ms, r.verified, r.proof_size_bytes, r.trace_len
+                        )?;
+                    }
+                    println!("Benchmark results written to {}", path.display());
+                } else if fmt == "json" {
+                    let j = serde_json::to_string_pretty(&records)?;
+                    let mut f = File::create(&path)?;
+                    f.write_all(j.as_bytes())?;
+                    println!("Benchmark results written to {}", path.display());
+                } else {
+                    println!("Unknown output format '{}', skipping file write", stark_output_format);
+                }
+            }
         }
 
         #[cfg(not(feature = "winterfell_v2"))]

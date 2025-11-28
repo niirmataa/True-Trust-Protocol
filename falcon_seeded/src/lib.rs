@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires PQClean sources
+    #[cfg(feature = "pqclean")] // Requires PQClean sources
     fn test_keypair_generation() {
         let drbg = Arc::new(TestDrbg::new());
         let result = keypair_with(drbg);
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires PQClean sources
+    #[cfg(feature = "pqclean")] // Requires PQClean sources
     fn test_sign_verify() {
         let drbg_keygen = Arc::new(TestDrbg::new());
         let (pk, sk) = keypair_with(drbg_keygen).unwrap();
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires PQClean sources
+    #[cfg(feature = "pqclean")] // Requires PQClean sources
     fn test_deterministic_keypair() {
         let drbg1 = Arc::new(TestDrbg::new());
         let (pk1, sk1) = keypair_with(drbg1).unwrap();

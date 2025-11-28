@@ -12,22 +12,22 @@
 //! # Example
 //! 
 //! ```no_run
-//! use quantum_falcon_wallet::falcon_sigs::*;
+//! use tt_node::falcon_sigs::*;
 //! 
 //! // Generate keypair
 //! let (pk, sk) = falcon_keypair();
 //! 
 //! // Sign nullifier
 //! let nullifier = [0x42u8; 32];
-//! let sig = falcon_sign_nullifier(&nullifier, &sk)?;
+//! let sig = falcon_sign_nullifier(&nullifier, &sk).unwrap();
 //! 
 //! // Verify
-//! falcon_verify_nullifier(&nullifier, &sig, &pk)?;
+//! falcon_verify_nullifier(&nullifier, &sig, &pk).unwrap();
 //! ```
 
 #![forbid(unsafe_code)]
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use pqcrypto_falcon::falcon512;
 use pqcrypto_traits::sign::{PublicKey as PQPublicKey, SecretKey as PQSecretKey, SignedMessage};
 use serde::{Deserialize, Serialize};
@@ -224,6 +224,23 @@ pub fn falcon_verify(
     Ok(())
 }
 
+/// Verify signature from raw bytes (for CompactSimpleTx, BatchTransfer)
+/// 
+/// # Arguments
+/// - `expected_message`: Message that was signed
+/// - `signature_bytes`: Raw signature bytes (attached format)
+/// - `public_key`: Falcon public key
+pub fn falcon_verify_bytes(
+    expected_message: &[u8],
+    signature_bytes: &[u8],
+    public_key: &FalconPublicKey,
+) -> Result<()> {
+    let sig = SignedNullifier {
+        signed_message_bytes: signature_bytes.to_vec(),
+    };
+    falcon_verify(expected_message, &sig, public_key)
+}
+
 /// Verify and extract message (without prior knowledge)
 /// 
 /// Useful for cases where you want to see what was signed
@@ -374,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_wrong_public_key_fails() {
-        let (pk1, sk1) = falcon_keypair();
+        let (_pk1, sk1) = falcon_keypair();
         let (pk2, _sk2) = falcon_keypair();
         
         let nullifier = [0x42u8; 32];

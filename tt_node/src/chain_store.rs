@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 
 use crate::core::{Hash32, Block};
 use crate::consensus_weights::Weight;

@@ -192,7 +192,6 @@ impl Drop for KmacDrbg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::RngCore as _;
 
     #[test]
     fn deterministic_same_seed_and_pers() {

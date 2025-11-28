@@ -18,7 +18,8 @@ use tokio::time::sleep;
 use tt_node::falcon_sigs::falcon_keypair;
 use tt_node::kyber_kem::kyber_keypair;
 use tt_node::node_core::NodeCore;
-use tt_node::rpc::rpc_secure::{rpc_identity_from_keys, RpcRequest, SecureRpcClient, SecureRpcServer};
+use tt_node::p2p::secure::NodeIdentity;
+use tt_node::rpc::rpc_secure::{RpcRequest, SecureRpcClient, SecureRpcServer};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,7 +38,7 @@ async fn main() -> Result<()> {
     let (server_falcon_pk, server_falcon_sk) = falcon_keypair();
     let (server_kyber_pk, server_kyber_sk) = kyber_keypair();
 
-    let server_identity = rpc_identity_from_keys(
+    let server_identity = NodeIdentity::from_keys(
         server_falcon_pk,
         server_falcon_sk,
         server_kyber_pk,
@@ -76,7 +77,7 @@ async fn main() -> Result<()> {
     let (client_falcon_pk, client_falcon_sk) = falcon_keypair();
     let (client_kyber_pk, client_kyber_sk) = kyber_keypair();
 
-    let client_identity = rpc_identity_from_keys(
+    let client_identity = NodeIdentity::from_keys(
         client_falcon_pk,
         client_falcon_sk,
         client_kyber_pk,
@@ -126,7 +127,7 @@ async fn main() -> Result<()> {
     println!("5️⃣  RPC: SubmitTransaction");
     let tx_hex = hex::encode(b"dummy_transaction_data");
     let response = client
-        .request(RpcRequest::SubmitTransaction { tx_hex })
+        .request(RpcRequest::SubmitTransaction { tx_hex, priority: tt_node::rpc::rpc_secure::TransactionPriority::Normal })
         .await?;
     println!("   Response: {:?}", response);
     println!();

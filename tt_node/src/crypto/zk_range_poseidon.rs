@@ -51,13 +51,13 @@ impl ToElements<BaseElement> for PublicInputs {
 /// Witness: wartość, blinding, recipient.
 #[derive(Clone, Debug)]
 pub struct Witness {
-    pub value: u64,
+    pub value: u128,
     pub blinding: [u8; 32],
     pub recipient: [u8; 32],
 }
 
 impl Witness {
-    pub fn new(value: u64, blinding: [u8; 32], recipient: [u8; 32]) -> Self {
+    pub fn new(value: u128, blinding: [u8; 32], recipient: [u8; 32]) -> Self {
         Self { value, blinding, recipient }
     }
 }
@@ -280,7 +280,7 @@ impl CompositeProver {
 
         for i in 0..(trace_rows - 1) {
             let bit_u64 = if i < self.num_bits {
-                ((witness.value >> i) & 1) as u64
+                ((witness.value >> i) & 1u128) as u64
             } else {
                 0u64
             };
@@ -296,7 +296,7 @@ impl CompositeProver {
 
         let poseidon_start = self.num_bits;
 
-        let value_fe = BaseElement::from(witness.value);
+        let value_fe = BaseElement::new(witness.value);
 
         let mut blind_bytes = [0u8; 8];
         blind_bytes.copy_from_slice(&witness.blinding[..8]);
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_poseidon_cpu_vs_trace() {
-        let witness = Witness::new(42, [7u8; 32], [3u8; 32]);
+        let witness = Witness::new(42u128, [7u8; 32], [3u8; 32]);
         let opts = default_proof_options();
         let prover = CompositeProver::new(64, opts);
         let trace = prover.build_trace(&witness);
@@ -548,7 +548,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_composite_proof_roundtrip() {
-        let witness = Witness::new(42, [9u8; 32], [5u8; 32]);
+        let witness = Witness::new(42u128, [9u8; 32], [5u8; 32]);
         let opts = default_proof_options();
 
         let (proof, pub_inputs) = prove_range_with_poseidon(

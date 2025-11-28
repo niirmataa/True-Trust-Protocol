@@ -24,6 +24,10 @@ pub mod node_core;
 pub mod hybrid_commit;
 pub mod stealth_pq;
 pub mod simple_pq_tx;
+pub mod key_registry;
+pub mod tx_compression;
+pub mod stealth_registry;
+pub mod private_stark_tx;
 
 pub mod p2p;
 pub mod rpc;

@@ -32,7 +32,7 @@
 //! }
 //!
 //! // Generate deterministic keypair
-//! let drbg = Arc::new(MyDrbg::new());
+//! let drbg = Arc::new(MyDrbg {});
 //! let (pk, sk) = keypair_with(drbg.clone()).unwrap();
 //!
 //! // Sign message deterministically
@@ -256,6 +256,7 @@ pub fn sign_with(
 /// use falcon_seeded::verify;
 ///
 /// let pk = [0u8; 897]; // Public key
+/// let signature = [0u8; 1]; // placeholder signature bytes for example
 /// let valid = verify(&pk, b"message", &signature);
 /// ```
 pub fn verify(pk: &[u8; PK_LEN], msg: &[u8], sig: &[u8]) -> bool {
@@ -303,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires PQClean sources
+    #[cfg(feature = "pqclean")] // Requires PQClean sources
     fn test_keypair_generation() {
         let drbg = Arc::new(TestDrbg::new());
         let result = keypair_with(drbg);
@@ -315,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires PQClean sources
+    #[cfg(feature = "pqclean")] // Requires PQClean sources
     fn test_sign_verify() {
         let drbg_keygen = Arc::new(TestDrbg::new());
         let (pk, sk) = keypair_with(drbg_keygen).unwrap();
@@ -329,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires PQClean sources
+    #[cfg(feature = "pqclean")] // Requires PQClean sources
     fn test_deterministic_keypair() {
         let drbg1 = Arc::new(TestDrbg::new());
         let (pk1, sk1) = keypair_with(drbg1).unwrap();

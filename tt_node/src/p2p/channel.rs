@@ -6,11 +6,12 @@
 //! - nonce counters (u64) per direction → brak nonce reuse.
 
 use anyhow::{anyhow, Result};
+use serde::{Serialize, Deserialize};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 
 use crate::crypto::kmac::kmac256_xof_fill;
 
@@ -18,7 +19,7 @@ use crate::crypto::kmac::kmac256_xof_fill;
 pub type TranscriptHash = [u8; 32];
 
 /// Symetryczny klucz sesyjny (32B) dla XChaCha20-Poly1305.
-#[derive(Clone, ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeOnDrop, Serialize, Deserialize)]
 pub struct SessionKey(#[zeroize] pub [u8; 32]);
 
 impl SessionKey {
@@ -29,7 +30,7 @@ impl SessionKey {
 }
 
 /// Para kluczy dla obu kierunków (client→server, server→client).
-#[derive(Clone, ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeOnDrop, Serialize, Deserialize)]
 pub struct SessionKeys {
     #[zeroize]
     pub client_to_server: SessionKey,

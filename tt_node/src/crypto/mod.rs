@@ -4,12 +4,15 @@
 //! - KMAC256-based primitives (key derivation, XOF, MAC)
 //! - KMAC-DRBG (deterministic RNG)
 //! - Deterministic Falcon integration (via falcon_seeded)
+//! - Deterministic Kyber-768 keypair (via pqc_kyber)
 //! - Kyber-768 KEM helpers
 //! - Poseidon hash (CPU) + Poseidon STARK AIR (Winterfell v0.13)
 
 pub mod kmac;
 pub mod kmac_drbg;
 pub mod seeded;
+#[cfg(feature = "seeded_kyber")]
+pub mod seeded_kyber;
 pub mod kyber_kem;
 pub mod poseidon_hash_cpu;
 #[cfg(feature = "winterfell_v2")]

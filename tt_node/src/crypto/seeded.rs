@@ -263,7 +263,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Requires PQClean sources in falcon_seeded
+    #[cfg(feature = "pqclean")] // Requires PQClean sources in falcon_seeded
     fn test_deterministic_keygen() {
         let seed = [0x11u8; 32];
         let pers = b"test/epoch=1/identity";
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires PQClean sources
+    #[cfg(feature = "pqclean")] // Requires PQClean sources
     fn test_deterministic_sign_per_context() {
         let seed_keygen = [0xABu8; 32];
         let (_pk, sk) = falcon_keypair_deterministic(seed_keygen, b"id").unwrap();
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires PQClean sources
+    #[cfg(feature = "pqclean")] // Requires PQClean sources
     fn test_sign_verify_roundtrip() {
         let seed = [0x42u8; 32];
         let (pk, sk) = falcon_keypair_deterministic(seed, b"test").unwrap();

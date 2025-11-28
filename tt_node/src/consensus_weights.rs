@@ -53,7 +53,18 @@ pub fn compute_final_weight_q(
 /// - `beacon` – randomness from RandomX / VRF (Hash256 encoded as [u8;32])
 /// - `validators` – list of `(NodeId, trust_q, quality_q, stake_q)`
 ///
-/// Note: `beacon` is only used to mix weights deterministically.
+/// ## Selection Model
+/// 
+/// **NOT a proportional lottery!** The validator with the highest weight wins.
+/// The beacon is only used as a deterministic tie-breaker when weights are equal.
+///
+/// This means:
+/// - High-quality validators win consistently (not probabilistically)
+/// - Stake alone cannot dominate (trust and quality matter more)
+/// - Deterministic: same inputs → same leader on all nodes
+///
+/// For proportional stake-weighted selection (like typical PoS), you would
+/// need VRF-based lottery. This design prioritizes quality over randomness.
 pub fn select_leader_deterministic(
     beacon: [u8; 32],
     validators: &[(NodeId, Q, Q, Q)],
@@ -76,9 +87,10 @@ pub fn select_leader_deterministic(
             score_bytes.copy_from_slice(&digest[16..32]);
             let score = u128::from_be_bytes(score_bytes);
 
-            (score, *id)
+            ((w, score), *id)
         })
-        .max_by_key(|(score, _)| *score)
+        // Prefer higher weight first, then break ties by deterministic score
+        .max_by(|a, b| a.0.cmp(&b.0))
         .map(|(_, id)| id)
 }
 

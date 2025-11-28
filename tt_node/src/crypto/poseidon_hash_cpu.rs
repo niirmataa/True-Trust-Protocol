@@ -106,13 +106,13 @@ impl PoseidonState {
 /// CPU-owy hash Poseidona – musi być bit-w-bit identyczny z tym,
 /// co symulujemy w śladzie STARKa.
 pub fn poseidon_hash_cpu(
-    value: u64,
+    value: u128,
     blinding: &[u8; 32],
     recipient: &[u8; 32],
 ) -> BaseElement {
     let mut st = PoseidonState::new();
 
-    let v = BaseElement::from(value);
+    let v = BaseElement::new(value);
 
     let blind = BaseElement::from(u64::from_le_bytes(
         blinding[0..8].try_into().expect("slice to [u8;8]"),
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn poseidon_hash_deterministic() {
-        let value = 42u64;
+        let value = 42u128;
         let blinding = [1u8; 32];
         let recipient = [2u8; 32];
 
@@ -145,7 +145,7 @@ mod tests {
         let h2 = poseidon_hash_cpu(value, &blinding, &recipient);
         assert_eq!(h1, h2);
 
-        let h3 = poseidon_hash_cpu(value + 1, &blinding, &recipient);
+        let h3 = poseidon_hash_cpu(value + 1u128, &blinding, &recipient);
         assert_ne!(h1, h3);
     }
 }

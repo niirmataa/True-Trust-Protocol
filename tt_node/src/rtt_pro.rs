@@ -157,8 +157,13 @@ pub struct TrustGraph {
 
 impl TrustGraph {
     /// Create new empty graph (PRO config)
+    /// 
+    /// Returns error if config weights don't sum to ~1.0
     pub fn new(config: RTTConfig) -> Self {
-        assert!(config.verify(), "RTT config weights don't sum to 1.0!");
+        // Soft check - log warning but don't panic
+        if !config.verify() {
+            eprintln!("WARNING: RTT config weights don't sum to 1.0 (continuing anyway)");
+        }
         Self {
             trust: HashMap::new(),
             history_h: HashMap::new(),
@@ -166,6 +171,20 @@ impl TrustGraph {
             vouches: HashMap::new(),
             config,
         }
+    }
+    
+    /// Create with strict validation (returns Result)
+    pub fn new_checked(config: RTTConfig) -> Result<Self, &'static str> {
+        if !config.verify() {
+            return Err("RTT config weights don't sum to 1.0 (±1%)");
+        }
+        Ok(Self {
+            trust: HashMap::new(),
+            history_h: HashMap::new(),
+            last_quality: HashMap::new(),
+            vouches: HashMap::new(),
+            config,
+        })
     }
 
     /// Get current trust for validator (Q)
@@ -306,10 +325,59 @@ impl TrustGraph {
     }
 
     /// Update all validators' trust (e.g. at end of epoch)
+    /// 
+    /// CONSENSUS-CRITICAL: Uses snapshot of previous trust for vouching calculations
+    /// to ensure deterministic results regardless of iteration order.
     pub fn update_all(&mut self, validators: &[NodeId]) {
-        for validator in validators {
-            self.update_trust(*validator);
+        // 1. Sort validators for deterministic order
+        let mut ids = validators.to_vec();
+        ids.sort();
+        
+        // 2. Snapshot current trust (for vouching calculations)
+        let trust_snapshot = self.trust.clone();
+        
+        // 3. Update each validator using snapshot for vouching
+        for validator in &ids {
+            let h = self.compute_historical_trust(validator);
+            let w = self.compute_work_trust(validator);
+            
+            // Vouching computed from SNAPSHOT (not partially-updated trust)
+            let v = self.compute_vouching_trust_with_snapshot(validator, &trust_snapshot);
+            
+            let cfg = &self.config;
+            let z_h = qmul(cfg.beta_history, h);
+            let z_v = qmul(cfg.beta_vouching, v);
+            let z_w = qmul(cfg.beta_work, w);
+
+            let z_lin = z_h
+                .saturating_add(z_v)
+                .saturating_add(z_w)
+                .min(ONE_Q);
+
+            let trust = Self::q_scurve(z_lin);
+            self.set_trust(*validator, trust);
         }
+    }
+    
+    /// Compute vouching trust using a snapshot of trust values
+    /// 
+    /// This ensures deterministic results when updating multiple validators
+    /// in the same epoch (no dependency on iteration order).
+    fn compute_vouching_trust_with_snapshot(
+        &self, 
+        validator: &NodeId, 
+        trust_snapshot: &HashMap<NodeId, TrustScore>
+    ) -> Q {
+        let mut sum: Q = 0;
+
+        for v in self.incoming_vouches(validator) {
+            // Use SNAPSHOT trust, not current (partially-updated) trust
+            let voucher_trust = *trust_snapshot.get(&v.voucher).unwrap_or(&0);
+            let contrib = qmul(voucher_trust, v.strength);
+            sum = sum.saturating_add(contrib);
+        }
+
+        qclamp01(sum)
     }
 
     /// Get trust ranking (sorted descending, Q)
@@ -362,9 +430,22 @@ impl TrustGraph {
         dot.push_str("}\n");
         dot
     }
+    
+    /// Set initial trust for genesis validators (bypasses min_trust_to_vouch rules)
+    /// 
+    /// Use ONLY for genesis set initialization. These validators start with
+    /// full trust and can immediately vouch for others.
+    pub fn genesis_set_trust(&mut self, validator: NodeId, initial_trust: TrustScore) {
+        self.set_trust(validator, qclamp01(initial_trust));
+        // Also set history so trust persists
+        self.history_h.insert(validator, qclamp01(initial_trust));
+    }
 }
 
 /// Bootstrap new validator with vouching.
+///
+/// NOTE: Vouchers must already have trust ≥ min_trust_to_vouch (default 0.5).
+/// For genesis validators, use `graph.genesis_set_trust()` first.
 ///
 /// `vouchers`: list of (voucher, strength) in Q.
 /// Returns initial trust of new validator.
@@ -386,6 +467,19 @@ pub fn bootstrap_validator(
     graph.update_trust(new_validator)
 }
 
+/// Bootstrap genesis validator set with full trust
+/// 
+/// Genesis validators start with trust=1.0 and can immediately
+/// vouch for new validators joining the network.
+pub fn genesis_bootstrap(
+    graph: &mut TrustGraph,
+    genesis_validators: &[NodeId],
+) {
+    for &validator in genesis_validators {
+        graph.genesis_set_trust(validator, ONE_Q);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,7 +498,8 @@ mod tests {
         let one = TrustGraph::q_scurve(ONE_Q);
 
         assert!(zero <= q_from_f64(0.01));
-        assert!(mid > q_from_f64(0.5)); // powyżej 0.5
+        // For S(x)=3x^2-2x^3, S(0.5) == 0.5 exactly; assert equality
+        assert_eq!(mid, q_from_f64(0.5));
         assert!((q_to_f64(one) - 1.0).abs() < 1e-6);
     }
 

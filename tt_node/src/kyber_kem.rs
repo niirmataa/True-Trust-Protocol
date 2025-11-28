@@ -9,7 +9,8 @@
 //!
 //! # Example
 //! ```no_run
-//! use tt_priv_cli::kyber_kem::*;
+//! use pqcrypto_traits::kem::SharedSecret;
+//! use tt_node::kyber_kem::*;
 //! 
 //! // Recipient generates keypair
 //! let (recipient_pk, recipient_sk) = kyber_keypair();

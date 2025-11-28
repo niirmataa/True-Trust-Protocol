@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
 
 pub type Hash32 = [u8; 32];
 
@@ -77,4 +76,55 @@ pub struct Block {
 
     /// Zserializowane transakcje (na razie placeholder).
     pub transactions: Vec<u8>,
+}
+
+/// Block V2 - with native STARK transactions and stealth hints (Monero-style)
+/// Stealth hints are embedded in transaction outputs and persisted in blockchain
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct BlockV2 {
+    pub header: BlockHeader,
+
+    /// PQC signature (Falcon) over header.id()
+    pub author_sig: Vec<u8>,
+
+    /// Optional ZK proof
+    pub zk_receipt_bincode: Vec<u8>,
+
+    /// Native STARK transactions with embedded stealth hints
+    /// Each TxOutputStark can contain TxStealthData for Monero-style hint persistence
+    pub stark_transactions: Vec<crate::tx_stark::TransactionStark>,
+
+    /// Legacy transactions (for backwards compatibility)
+    pub legacy_transactions: Vec<u8>,
+}
+
+impl BlockV2 {
+    /// Get all stealth hints from this block's transactions
+    /// Used for wallet scanning (Monero-style)
+    pub fn collect_stealth_hints(&self) -> Vec<crate::tx_stark::TxStealthData> {
+        let mut hints = Vec::new();
+        for tx in &self.stark_transactions {
+            for output in &tx.outputs {
+                if let Some(ref hint) = output.stealth_hint {
+                    hints.push(hint.clone());
+                }
+            }
+        }
+        hints
+    }
+
+    /// Get block ID
+    pub fn id(&self) -> Hash32 {
+        self.header.id()
+    }
+
+    /// Convert to bytes for storage
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("BlockV2 serialize")
+    }
+
+    /// Deserialize from bytes
+    pub fn from_bytes(data: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(data)
+    }
 }

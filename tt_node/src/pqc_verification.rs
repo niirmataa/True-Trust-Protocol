@@ -23,9 +23,8 @@
 
 #![forbid(unsafe_code)]
 
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use pqcrypto_falcon::falcon512;
-use pqcrypto_traits::sign::PublicKey as PQPublicKey;
 use serde::{Deserialize, Serialize};
 
 pub type Hash32 = [u8; 32];
@@ -292,8 +291,9 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use pqcrypto_falcon::falcon512;
     use pqcrypto_kyber::kyber768 as mlkem;
-    use pqcrypto_traits::sign::{PublicKey as PQPublicKey, SignedMessage};
+    use pqcrypto_traits::sign::PublicKey as PQPublicKey;
     use pqcrypto_traits::kem::PublicKey as PQKemPublicKey;
+    use anyhow::anyhow;
 
     // Mock verification context for testing
     struct MockContext {

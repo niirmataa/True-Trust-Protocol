@@ -1,11 +1,10 @@
 [package]
-name = "falcon_seeded"
+name = "falcon_seeded_orig"
 version = "0.1.0"
 edition = "2021"
 authors = ["Quantum Security Team"]
 description = "Deterministic Falcon-512 signing via KMAC-DRBG (FFI to PQClean)"
 license = "MIT"
-links = "falcon_seeded"
 
 [dependencies]
 libc = "0.2"
@@ -17,3 +16,4 @@ cc = "1.0"
 default = []
 # Future: avx2 support from PQClean
 # avx2 = []
+pqclean = []

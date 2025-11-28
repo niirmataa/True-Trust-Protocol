@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "tt_node",
-    "falcon_seeded"
+    "tt_node/falcon_seeded"
 ]
 
 resolver = "2"

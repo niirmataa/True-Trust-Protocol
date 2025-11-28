@@ -65,6 +65,16 @@ impl SecureNodeIdentity {
         let (kyber_pk, kyber_sk) = kyber_keypair();
         Self::from_keys(falcon_pk, falcon_sk, kyber_pk, kyber_sk)
     }
+
+    /// Accessor for kyber secret key (needed by tests/examples that decrypt values).
+    pub fn kyber_sk(&self) -> &KyberSecretKey {
+        &self.kyber_sk
+    }
+
+    /// Accessor for falcon secret key (needed for signing in some modules).
+    pub fn falcon_sk(&self) -> &FalconSecretKey {
+        &self.falcon_sk
+    }
 }
 
 /* ======================= Transcript ===================== */
@@ -109,6 +119,11 @@ impl TranscriptHasher {
         out.copy_from_slice(&digest);
         out
     }
+
+    /// Clone current transcript state (convenience wrapper).
+    pub fn clone_state(&self) -> TranscriptHasher {
+        self.clone()
+    }
 }
 
 /* ======================= Messages ===================== */
@@ -130,6 +145,7 @@ struct ServerHelloUnsigned {
     pub kyber_ct: Vec<u8>,
     pub protocol_version: u32,
     pub timestamp: u64,
+    pub next_key_announcement: Option<KeyAnnouncement>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -140,6 +156,17 @@ pub struct ServerHello {
     pub protocol_version: u32,
     pub timestamp: u64,
     pub falcon_signature: FalconSignature,
+    // Optional announcement about the next identity (for staged rotation)
+    pub next_key_announcement: Option<KeyAnnouncement>,
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KeyAnnouncement {
+    pub new_falcon_pk: Vec<u8>,
+    pub new_kyber_pk: Vec<u8>,
+    pub valid_from_timestamp: u64,
+    pub signature: FalconSignature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -199,6 +226,8 @@ pub fn handle_client_hello(
     ch: &ClientHello,
     expected_version: u32,
     mut transcript: TranscriptHasher,
+    // Optional announcement to include in ServerHello
+    announcement: Option<KeyAnnouncement>,
 ) -> Result<(ServerHello, SessionKeys, TranscriptHasher)> {
     if ch.protocol_version != expected_version {
         return Err(anyhow!(
@@ -230,6 +259,7 @@ pub fn handle_client_hello(
         kyber_ct: ct_bytes.clone(),
         protocol_version: expected_version,
         timestamp: now_secs(),
+        next_key_announcement: announcement.clone(),
     };
 
     let sh_unsigned_bytes = bincode::serialize(&sh_unsigned)?;
@@ -247,6 +277,7 @@ pub fn handle_client_hello(
         protocol_version: sh_unsigned.protocol_version,
         timestamp: sh_unsigned.timestamp,
         falcon_signature: sig,
+        next_key_announcement: announcement,
     };
 
     // KDF kluczy sesyjnych
@@ -285,6 +316,7 @@ pub fn handle_server_hello(
         kyber_ct: sh.kyber_ct.clone(),
         protocol_version: sh.protocol_version,
         timestamp: sh.timestamp,
+        next_key_announcement: sh.next_key_announcement.clone(),
     };
     let sh_unsigned_bytes = bincode::serialize(&sh_unsigned)?;
     transcript.update(b"SERVER_HELLO", &sh_unsigned_bytes);

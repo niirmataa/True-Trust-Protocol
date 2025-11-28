@@ -62,10 +62,10 @@ fn generate_mds_matrix() -> [[BaseElement; POSEIDON_WIDTH]; POSEIDON_WIDTH] {
     let t: u64 = POSEIDON_WIDTH as u64;
 
     let xs: Vec<BaseElement> = (0..t)
-        .map(|i| BaseElement::new(((i + 1) as u128)))
+        .map(|i| BaseElement::new((i + 1) as u128))
         .collect();
     let ys: Vec<BaseElement> = (0..t)
-        .map(|j| BaseElement::new(((t + j + 1) as u128)))
+        .map(|j| BaseElement::new((t + j + 1) as u128))
         .collect();
 
     let mut m = [[BaseElement::new(0u128); POSEIDON_WIDTH]; POSEIDON_WIDTH];

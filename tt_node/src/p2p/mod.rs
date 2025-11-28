@@ -38,11 +38,13 @@ use crate::{
 
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
-/// Prosty typ wiadomości P2P – na razie ping + STARK TX.
+/// Prosty typ wiadomości P2P – ping, STARK TX, Stealth Hint.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum P2PMessage {
     Ping { nonce: u64 },
     StarkTx { tx_bytes: Vec<u8> },
+    /// Encrypted stealth hint (for private payments)
+    StealthHint { hint_bytes: Vec<u8> },
 }
 
 /// Połączenie z peerm – strumień TCP + zaszyfrowany kanał.
@@ -186,29 +188,17 @@ impl P2PNetwork {
 
     /// Prosty broadcast: wysyła bajty do wszystkich peerów (zaszyfrowane).
     pub async fn broadcast(&self, payload: &[u8]) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
+        // no longer need AsyncWriteExt here (we use helper write_secure_message)
 
         let peers = self.peers.read().await;
 
         for (node_id, peer) in peers.iter() {
             let mut conn_guard = peer.conn.lock().await;
 
-            // 1. Najpierw szyfrujemy wiadomość, używając tylko channel
-            let ciphertext = match conn_guard.channel.encrypt(payload, &[]) {
-                Ok(ct) => ct,
-                Err(e) => {
-                    eprintln!(
-                        "[P2P] encrypt for {} failed: {}",
-                        hex::encode(node_id),
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            // 2. Dopiero potem bierzemy stream i wysyłamy ciphertext
-            if let Err(e) = conn_guard.stream.write_all(&ciphertext).await {
-                eprintln!(
+            // Use helper to frame + encrypt + write the payload
+            let PeerConnection { stream, channel } = &mut *conn_guard;
+            if let Err(e) = write_secure_message(stream, channel, payload).await {
+                log::error!(
                     "[P2P] send to {} failed: {}",
                     hex::encode(node_id),
                     e
@@ -232,6 +222,28 @@ impl P2PNetwork {
         println!(
             "[P2P] Broadcasting STARK tx to {} peers",
             count
+        );
+        Ok(count)
+    }
+
+    /// Broadcast stealth hint (encrypted, PQ-secure).
+    /// 
+    /// Hint jest zaszyfrowany Kyber → tylko odbiorca może odszyfrować.
+    /// Broadcast przez P2P → każdy node może skanować czy hint jest dla niego.
+    pub async fn broadcast_stealth_hint(&self, hint_bytes: &[u8]) -> Result<usize> {
+        let msg = P2PMessage::StealthHint {
+            hint_bytes: hint_bytes.to_vec(),
+        };
+        let payload = bincode::serialize(&msg)?;
+        let peers = self.peers.read().await;
+        let count = peers.len();
+        drop(peers);
+
+        self.broadcast(&payload).await?;
+        println!(
+            "[P2P] 🔒 Broadcasting stealth hint to {} peers ({} bytes)",
+            count,
+            hint_bytes.len()
         );
         Ok(count)
     }
@@ -261,9 +273,9 @@ impl P2PNetwork {
 
         let identity = self.identity.read().await;
         let transcript = TranscriptHasher::new();
-        let (sh, session_keys, transcript) =
-            handle_client_hello(&identity, &ch, PROTOCOL_VERSION, transcript)
-                .context("ClientHello validation failed")?;
+            let (sh, session_keys, transcript) =
+                handle_client_hello(&identity, &ch, PROTOCOL_VERSION, transcript, None)
+                    .context("ClientHello validation failed")?;
         drop(identity);
 
         let sh_bytes = bincode::serialize(&sh)?;
@@ -327,19 +339,28 @@ async fn peer_reader_loop(
 
         match bincode::deserialize::<P2PMessage>(&plaintext) {
             Ok(P2PMessage::Ping { nonce }) => {
-                println!(
+                log::info!(
                     "[P2P] 🏓 ping {} from {}",
                     nonce,
                     hex::encode(node_id)
                 );
             }
             Ok(P2PMessage::StarkTx { tx_bytes }) => {
-                println!(
+                log::info!(
                     "[P2P] 💸 STARK tx ({} bytes) from {}",
                     tx_bytes.len(),
                     hex::encode(node_id)
                 );
                 // TODO: przekazać do NodeCore / mempoolu
+            }
+            Ok(P2PMessage::StealthHint { hint_bytes }) => {
+                log::info!(
+                    "[P2P] 🔒 Stealth hint ({} bytes) from {}",
+                    hint_bytes.len(),
+                    hex::encode(node_id)
+                );
+                // TODO: przekazać do hint pool / callback do skanowania
+                // Na razie logujemy — odbiorca może skanować lokalnie.
             }
             Err(e) => {
                 println!(

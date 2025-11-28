@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use winterfell::math::{fields::f128::BaseElement, FieldElement};
+use winterfell::math::fields::f128::BaseElement;
 
 pub const POSEIDON_WIDTH: usize = 8;
 pub const FULL_ROUNDS: usize = 8;

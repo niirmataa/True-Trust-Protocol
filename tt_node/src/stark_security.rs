@@ -95,7 +95,7 @@ impl SecurityParams {
     /// **Formula:** -log₂(ε) where ε = soundness error
     ///
     /// FRI soundness (simplified): 
-    /// ```
+    /// ```text
     /// ε ≈ (ρ + ε₀)^q
     /// ```
     ///

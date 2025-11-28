@@ -4,9 +4,4 @@
 pub mod rpc_secure;
 
 // Re-exporty, żeby można było pisać crate::rpc::{...}
-pub use rpc_secure::{
-    SecureRpcServer,
-    SecureRpcClient,
-    RpcRequest,
-    RpcResponse,
-};
+pub use rpc_secure::{SecureRpcClient, RpcRequest, RpcResponse, PrivacyMode, ProxyConfig};

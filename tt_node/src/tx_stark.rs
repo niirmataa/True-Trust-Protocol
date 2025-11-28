@@ -1,13 +1,19 @@
 #![forbid(unsafe_code)]
 
 //! Post-Quantum Transactions with STARK Range Proofs (Winterfell)
+//! 
+//! Each TxOutput contains:
+//! - Poseidon commitment (value + blinding + recipient)
+//! - STARK range proof (proves value >= 0 without revealing it)
+//! - Encrypted value (Kyber + XChaCha20-Poly1305)
+//! - Stealth hint (for recipient scanning) - Monero-style in blockchain
 
 use serde::{Serialize, Deserialize};
 use sha3::{Sha3_256, Digest};
 use rand::RngCore;
 
 use winterfell::Proof as StarkProof;
-use winterfell::math::{FieldElement, StarkField};
+use winterfell::math::StarkField;
 
 use crate::falcon_sigs::BlockSignature;
 use crate::core::Hash32;
@@ -19,12 +25,49 @@ use crate::crypto::zk_range_poseidon::{
     prove_range_with_poseidon,
     verify_range_with_poseidon,
 };
+use crate::stealth_pq::{StealthHint, StealthHintBuilder, StealthAddressPQ};
 
 /// Kyber768 ciphertext size (1088 bytes)
 const KYBER768_CT_BYTES: usize = 1088;
 
 /// Liczba bitów zakresu dla wartości (u64)
 const VALUE_NUM_BITS: usize = 64;
+
+/// Stealth hint embedded in transaction output (Monero-style)
+/// This ensures hints are persisted in blockchain, not ephemeral pool
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TxStealthData {
+    /// 8-byte scan tag for quick filtering
+    pub scan_tag: [u8; 8],
+    /// Kyber KEM ciphertext (1088 bytes)
+    pub kem_ct: Vec<u8>,
+    /// AES-GCM nonce (12 bytes)
+    pub nonce: [u8; 12],
+    /// Encrypted payload (value, memo, r_blind)
+    pub encrypted_payload: Vec<u8>,
+}
+
+impl TxStealthData {
+    /// Create from StealthHint
+    pub fn from_hint(hint: &StealthHint) -> Self {
+        Self {
+            scan_tag: hint.scan_tag,
+            kem_ct: hint.kem_ct.clone(),
+            nonce: hint.nonce,
+            encrypted_payload: hint.ciphertext.clone(),
+        }
+    }
+
+    /// Convert back to StealthHint for scanning
+    pub fn to_hint(&self) -> StealthHint {
+        StealthHint {
+            scan_tag: self.scan_tag,
+            kem_ct: self.kem_ct.clone(),
+            nonce: self.nonce,
+            ciphertext: self.encrypted_payload.clone(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxOutputStark {
@@ -39,6 +82,10 @@ pub struct TxOutputStark {
 
     /// Zaszyfrowana wartość: nonce(24B) || XChaCha20-Poly1305(ct) || KyberCiphertext
     pub encrypted_value: Vec<u8>,
+
+    /// Stealth hint for recipient scanning (Monero-style, persisted in blockchain)
+    /// Optional for backwards compatibility
+    pub stealth_hint: Option<TxStealthData>,
 }
 
 impl TxOutputStark {
@@ -49,11 +96,11 @@ impl TxOutputStark {
         recipient_kyber_pk: &crate::kyber_kem::KyberPublicKey,
     ) -> Self {
         // 1) Commitment po stronie CPU
-        let poseidon_elem = poseidon_hash_cpu(value, blinding, &recipient);
+        let poseidon_elem = poseidon_hash_cpu(value as u128, blinding, &recipient);
         let poseidon_commitment: u128 = poseidon_elem.as_int();
 
         // 2) ZK range proof z linkiem do Poseidon commitment
-        let witness = RangeWitness::new(value, *blinding, recipient);
+        let witness = RangeWitness::new(value as u128, *blinding, recipient);
         let opts = default_proof_options();
 
         let (proof, pub_inputs) = prove_range_with_poseidon(
@@ -109,7 +156,32 @@ impl TxOutputStark {
             stark_proof,
             recipient,
             encrypted_value,
+            stealth_hint: None, // Use new_with_stealth for stealth payments
         }
+    }
+
+    /// Create output with embedded stealth hint (Monero-style)
+    pub fn new_with_stealth(
+        value: u64,
+        blinding: &[u8; 32],
+        recipient: Hash32,
+        recipient_kyber_pk: &crate::kyber_kem::KyberPublicKey,
+        recipient_stealth: &StealthAddressPQ,
+        memo: &str,
+    ) -> Self {
+        // Create base output
+        let mut output = Self::new(value, blinding, recipient, recipient_kyber_pk);
+
+        // Build stealth hint
+        let hint = StealthHintBuilder::new(value)
+            .memo(memo.as_bytes().to_vec())
+            .expect("memo too large")
+            .r_blind(*blinding)
+            .build(recipient_stealth)
+            .expect("failed to build stealth hint");
+
+        output.stealth_hint = Some(TxStealthData::from_hint(&hint));
+        output
     }
 
     /// Weryfikacja tylko STARK-a (bez decryptowania)
@@ -180,7 +252,7 @@ impl TxOutputStark {
     ) -> Option<u64> {
         let (value, blinding) = self.decrypt_value(kyber_sk)?;
 
-        let poseidon_elem = poseidon_hash_cpu(value, &blinding, &self.recipient);
+        let poseidon_elem = poseidon_hash_cpu(value as u128, &blinding, &self.recipient);
         let expected_commitment: u128 = poseidon_elem.as_int();
 
         if expected_commitment != self.poseidon_commitment {
@@ -306,5 +378,58 @@ mod tests {
         let (valid, total) = tx.verify_all_proofs();
         assert_eq!(valid, total);
         assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn test_tx_output_with_stealth_hint() {
+        use pqcrypto_falcon::falcon512;
+        use pqcrypto_kyber::kyber768;
+        use crate::stealth_pq::{StealthAddressPQ, StealthSecretsPQ, decrypt_stealth_hint, ScanResult};
+
+        // Generate recipient keys (Bob)
+        let (falcon_pk, falcon_sk) = falcon512::keypair();
+        let (kyber_pk, kyber_sk) = kyber768::keypair();
+        
+        let bob_stealth = StealthAddressPQ::from_pks(falcon_pk.clone(), kyber_pk.clone());
+        let bob_secrets = StealthSecretsPQ::from_sks(
+            falcon_sk,
+            kyber_sk.clone(),
+            &falcon_pk,
+            &kyber_pk,
+        );
+
+        // Create transaction output with stealth hint
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+        let recipient = bob_stealth.id();
+
+        let kyber_pk_kem = crate::kyber_kem::kyber_keypair().0; // For encrypted_value
+
+        let output = TxOutputStark::new_with_stealth(
+            50_000,
+            &blinding,
+            recipient,
+            &kyber_pk_kem,
+            &bob_stealth,
+            "Test stealth payment in tx",
+        );
+
+        // Verify STARK proof works
+        assert!(output.verify());
+        
+        // Verify stealth hint is present
+        assert!(output.stealth_hint.is_some());
+        let stealth_data = output.stealth_hint.as_ref().unwrap();
+        
+        // Bob can scan and decrypt the hint
+        let hint = stealth_data.to_hint();
+        match decrypt_stealth_hint(&bob_secrets, &hint) {
+            ScanResult::Match(payload) => {
+                assert_eq!(payload.value, 50_000);
+                assert_eq!(payload.memo, b"Test stealth payment in tx");
+                println!("✅ Stealth hint in tx decrypted successfully!");
+            }
+            other => panic!("Expected Match, got {:?}", other),
+        }
     }
 }

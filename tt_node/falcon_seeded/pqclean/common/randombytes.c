@@ -326,6 +326,12 @@ static int randombytes_js_randombytes_nodejs(void *buf, size_t n) {
 #endif /* defined(__EMSCRIPTEN__) */
 
 int randombytes(uint8_t *output, size_t n) {
+    /* If a test / wrapper has installed a fill callback, use it. */
+    extern void (*tt_fill_cb)(uint8_t *, size_t);
+    if (tt_fill_cb) {
+        tt_fill_cb(output, n);
+        return 0;
+    }
     void *buf = (void *)output;
     #if defined(__EMSCRIPTEN__)
     return randombytes_js_randombytes_nodejs(buf, n);

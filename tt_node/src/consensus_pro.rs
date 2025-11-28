@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::node_id::NodeId;
-use crate::rtt_pro::{q_from_f64, q_to_f64, Q, TrustGraph, TrustScore, RTTConfig, ONE_Q};
+use crate::rtt_pro::{q_from_f64, q_to_f64, Q, TrustGraph, TrustScore, RTTConfig};
 use crate::consensus_weights::{compute_final_weight_q, select_leader_deterministic, Weight};
 
 /// Slot / consensus round identifier.
@@ -175,13 +175,21 @@ impl ConsensusPro {
     }
 
     /// Updates trust for entire list of validators (e.g. at end of epoch).
+    /// 
+    /// CONSENSUS-CRITICAL: Validators are sorted before update to ensure
+    /// deterministic results across all nodes.
     pub fn update_all_trust(&mut self) {
-        let ids: Vec<_> = self.validators.keys().cloned().collect();
+        // Sort for deterministic order (HashMap iteration is non-deterministic)
+        let mut ids: Vec<_> = self.validators.keys().cloned().collect();
+        ids.sort();
+        
+        // update_all() now uses snapshot internally for vouching
         self.trust_graph.update_all(&ids);
 
-        for id in ids {
-            if let Some(v) = self.validators.get_mut(&id) {
-                v.trust_q = self.trust_graph.get_trust(&id);
+        // Sync trust back to validator states
+        for id in &ids {
+            if let Some(v) = self.validators.get_mut(id) {
+                v.trust_q = self.trust_graph.get_trust(id);
             }
         }
     }
@@ -258,6 +266,8 @@ impl ConsensusPro {
 mod tests {
     use super::*;
 
+    use crate::rtt_pro::ONE_Q;
+
     fn mk_id(byte: u8) -> NodeId {
         [byte; 32]
     }
@@ -333,6 +343,7 @@ mod tests {
         }
         c.update_all_trust();
 
+        
         let beacon = [0x42u8; 32];
         let leader1 = c.select_leader(beacon).unwrap();
         let leader2 = c.select_leader(beacon).unwrap();

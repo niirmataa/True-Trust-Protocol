@@ -229,6 +229,9 @@ pub fn compute_effective_stake(stake: u64, lock_days: u32) -> f64 {
 /// Minimalny stake przy wzroście liczby walidatorów.
 ///
 /// min_stake = BASE × (1 + log₁₀(validators / 100))
+///
+/// ⚠️ OFF-CHAIN ANALYTICS ONLY - uses f64 internally.
+/// For on-chain staking rules, use integer-only version or lookup table.
 pub fn compute_min_stake(total_validators: u64, base_stake: u64) -> u64 {
     let growth_factor = if total_validators > 100 {
         ((total_validators as f64) / 100.0).log10()
@@ -241,6 +244,9 @@ pub fn compute_min_stake(total_validators: u64, base_stake: u64) -> u64 {
 /// Kwota slasha (f64 na wejściu, finalnie u64).
 ///
 /// slash = base_penalty × severity × stake
+///
+/// ⚠️ OFF-CHAIN ANALYTICS ONLY - uses f64 internally.
+/// For on-chain slashing, use integer-only version with fixed severity levels.
 pub fn compute_slash_amount(
     stake: u64,
     severity: u32,

@@ -72,3 +72,16 @@ venv/
 /target/
 /tt_node/target/
 
+
+# Unused code archive
+tt_node/src/_unused/
+
+# Test data
+*.dat
+stealth_hints/
+
+# Windows artifacts
+*:Zone.Identifier
+
+# Test scripts
+test_*.sh
