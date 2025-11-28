@@ -85,3 +85,4 @@ stealth_hints/
 
 # Test scripts
 test_*.sh
+_unused_docs/
