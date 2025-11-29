@@ -75,7 +75,7 @@ Falcon is a lattice-based signature scheme selected by NIST for standardization.
 | Secret Key Size   | 1,281 bytes | 32 bytes          |
 | Signature Size    | ~657 bytes  | 64 bytes          |
 | Security Level    | 128-bit PQ  | 128-bit classical |
-| Quantum Resistant | ✅ Yes      | ❌ No             |
+| Quantum Resistant | ✅ Yes      | ❌ No            |
 
 **Measured Performance (AMD Ryzen 3 5300U):**
 
@@ -95,7 +95,7 @@ Kyber (ML-KEM) is a lattice-based key encapsulation mechanism standardized by NI
 | Secret Key Size   | 2,400 bytes | 32 bytes |
 | Ciphertext Size   | 1,088 bytes | 32 bytes |
 | Shared Secret     | 32 bytes    | 32 bytes |
-| Quantum Resistant | ✅ Yes      | ❌ No    |
+| Quantum Resistant | ✅ Yes      | ❌ No   |
 
 **Measured Performance:**
 
@@ -449,8 +449,8 @@ The implementation includes 126 automated tests covering security-critical paths
 
 ### 10.1 Completed Components
 
-| Component             | Status      | Lines of Code |
-|-----------------------|-------------|---------------|
+| Component             | Status      | Lines of Code  |
+|-----------------------|-------------|----------------|
 | Falcon-512 Signatures | ✅ Complete | ~600          |
 | Kyber-768 KEM         | ✅ Complete | ~400          |
 | STARK Range Proofs    | ✅ Complete | ~1,500        |
@@ -462,7 +462,7 @@ The implementation includes 126 automated tests covering security-critical paths
 | RPC Server            | ✅ Complete | ~2,500        |
 | Wallet CLI            | ✅ Complete | ~3,100        |
 | Security Tests        | ✅ Complete | ~2,500        |
-| **Total**             |             | **~33,000**   |
+| **Total**             |              | **~33,000**    |
 
 ### 10.2 Code Quality
 

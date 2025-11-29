@@ -11,11 +11,19 @@
 //!
 //! # Usage
 //!
-//! ```no_run
+//! ```
+//! # #[cfg(feature = "seeded_kyber")]
+//! # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //! use tt_node::crypto::seeded_kyber::kyber_keypair_deterministic;
 //!
 //! let seed = [0x42u8; 32];
-//! let (pk, sk) = kyber_keypair_deterministic(seed, b"TT.v7.KYBER768").unwrap();
+//! let (pk, sk) = kyber_keypair_deterministic(seed, b"TT.v7.KYBER768")?;
+//! assert_eq!(pk.len(), 1184);
+//! assert_eq!(sk.len(), 2400);
+//! # Ok(())
+//! # }
+//! # #[cfg(not(feature = "seeded_kyber"))]
+//! # fn main() {}
 //! ```
 
 #![cfg(feature = "seeded_kyber")]
@@ -43,9 +51,18 @@ pub const KYBER_SK_LEN: usize = 2400;
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```
+/// # #[cfg(feature = "seeded_kyber")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// use tt_node::crypto::seeded_kyber::kyber_keypair_deterministic;
+///
 /// let master_seed = [0x42u8; 32];
-/// let (pk, sk) = kyber_keypair_deterministic(master_seed, b"TT.v7.KYBER768").unwrap();
+/// let (pk, sk) = kyber_keypair_deterministic(master_seed, b"TT.v7.KYBER768")?;
+/// assert_eq!(pk.len(), 1184);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "seeded_kyber"))]
+/// # fn main() {}
 /// ```
 ///
 /// # Security

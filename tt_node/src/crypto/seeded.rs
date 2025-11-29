@@ -35,20 +35,24 @@
 //!
 //! # Usage
 //!
-//! ```no_run
-//! use quantum_falcon_wallet::crypto::seeded::{
-//!     falcon_keypair_deterministic,
-//!     falcon_sign_deterministic
-//! };
+//! ```
+//! # #[cfg(feature = "seeded_falcon")]
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use tt_node::crypto::seeded::{falcon_keypair_deterministic, falcon_sign_deterministic};
+//! use tt_node::crypto::kmac::kmac256_derive_key;
 //!
 //! // Deterministic keygen
 //! let seed = [0x42u8; 32];
-//! let (pk, sk) = falcon_keypair_deterministic(seed, b"epoch=1/identity").unwrap();
+//! let (pk, sk) = falcon_keypair_deterministic(seed, b"epoch=1/identity")?;
 //!
-//! // Deterministic signing (coins bound to transcript)
-//! let transcript = b"my transaction data";
-//! let sig_seed = /* derive from sk + transcript */;
-//! let sig = falcon_sign_deterministic(&sk, transcript, sig_seed, b"signing.v1").unwrap();
+//! // Deterministic signing (coins derived from sk + message)
+//! let msg = b"my transaction data";
+//! let coins_seed = kmac256_derive_key(&sk[..32], b"coins", msg);
+//! let sig = falcon_sign_deterministic(&sk, msg, coins_seed, b"signing.v1")?;
+//! # Ok(())
+//! # }
+//! # #[cfg(not(feature = "seeded_falcon"))]
+//! # fn main() {}
 //! ```
 //!
 //! # Security Notes
@@ -102,11 +106,18 @@ impl FillBytes for DrbgFill {
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```
+/// # #[cfg(feature = "seeded_falcon")]
+/// # fn main() {
+/// use tt_node::crypto::seeded::falcon_keypair_deterministic;
 /// let master_seed = [0x42u8; 32];
 /// let epoch = 5u64;
 /// let pers = format!("FALCON/keygen/epoch={}", epoch);
 /// let (pk, sk) = falcon_keypair_deterministic(master_seed, pers.as_bytes()).unwrap();
+/// assert_eq!(pk.len(), 897);
+/// # }
+/// # #[cfg(not(feature = "seeded_falcon"))]
+/// # fn main() {}
 /// ```
 ///
 /// # Security
@@ -149,38 +160,27 @@ pub fn falcon_keypair_deterministic(
 ///
 /// **Never reuse (coins_seed, personalization) for different messages!**
 ///
-/// Recommended pattern:
-/// ```no_run
-/// // 1. Derive PRF key from secret key
-/// let sk_prf = kmac256_derive_key(sk, b"FALCON/sk-prf", b"v1");
-///
-/// // 2. Bind coins to message via transcript
-/// let transcript = /* ... */;
-/// let tr_tag = kmac256_derive_key(&transcript, b"coins/domain", b"v1");
-///
-/// // 3. Personalization = domain + transcript tag
-/// let mut pers = b"FALCON/coins".to_vec();
-/// pers.extend_from_slice(&tr_tag[..16]);
-///
-/// // 4. Sign with deterministic coins
-/// let sig = falcon_sign_deterministic(&sk, &transcript, sk_prf, &pers)?;
-/// ```
-///
 /// # Example
 ///
-/// ```no_run
-/// use quantum_falcon_wallet::crypto::seeded::falcon_sign_deterministic;
-/// use quantum_falcon_wallet::crypto::kmac::kmac256_derive_key;
+/// ```
+/// # #[cfg(feature = "seeded_falcon")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use tt_node::crypto::seeded::{falcon_keypair_deterministic, falcon_sign_deterministic};
+/// use tt_node::crypto::kmac::kmac256_derive_key;
 ///
-/// let sk = [0u8; 1281]; // Your Falcon secret key
+/// // Generate keypair
+/// let seed = [0x42u8; 32];
+/// let (pk, sk) = falcon_keypair_deterministic(seed, b"test")?;
+///
+/// // Sign message
 /// let msg = b"transaction data";
-///
-/// // Derive coins seed from sk + message
-/// let sk_bytes = &sk[..32]; // Use portion of SK
-/// let coins_seed = kmac256_derive_key(sk_bytes, b"coins-seed", msg);
-///
-/// // Sign
-/// let sig = falcon_sign_deterministic(&sk, msg, coins_seed, b"ctx=tx1").unwrap();
+/// let coins_seed = kmac256_derive_key(&sk[..32], b"coins-seed", msg);
+/// let sig = falcon_sign_deterministic(&sk, msg, coins_seed, b"ctx=tx1")?;
+/// assert!(!sig.is_empty());
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "seeded_falcon"))]
+/// # fn main() {}
 /// ```
 pub fn falcon_sign_deterministic(
     sk: &[u8; fs::SK_LEN],
@@ -240,12 +240,18 @@ pub fn falcon_verify(pk: &[u8; fs::PK_LEN], msg: &[u8], sig: &[u8]) -> bool {
 ///
 /// # Example
 ///
-/// ```no_run
-/// let sk = [0u8; 1281]; // Your Falcon SK
-/// let sk_prf = derive_sk_prf(&sk);
+/// ```
+/// # #[cfg(feature = "seeded_falcon")]
+/// # fn main() {
+/// use tt_node::crypto::seeded::derive_sk_prf;
 ///
-/// // Later, for signing:
-/// let coins_seed = kmac256_derive_key(&sk_prf, b"coins", &transcript);
+/// const FALCON_SK_LEN: usize = 1281;
+/// let sk = [0xCDu8; FALCON_SK_LEN];
+/// let sk_prf = derive_sk_prf(&sk);
+/// assert_eq!(sk_prf.len(), 32);
+/// # }
+/// # #[cfg(not(feature = "seeded_falcon"))]
+/// # fn main() {}
 /// ```
 pub fn derive_sk_prf(sk: &[u8; fs::SK_LEN]) -> [u8; 32] {
     // Use first 32 bytes of SK as seed for PRF derivation
