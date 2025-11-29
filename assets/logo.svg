@@ -1,0 +1,87 @@
+<svg width="512" height="256" viewBox="0 0 512 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="panelGrad" cx="0%" cy="0%" r="120%">
+      <stop offset="0%" stop-color="#111827"/>
+      <stop offset="60%" stop-color="#020617"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </radialGradient>
+
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="16" result="blur"/>
+      <feColorMatrix in="blur" type="matrix"
+        values="0 0 0 0 0.125
+                0 0 0 0 0.729
+                0 0 0 0 0.973
+                0 0 0 0.65 0"/>
+    </filter>
+
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="40%" stop-color="#22D3EE"/>
+      <stop offset="100%" stop-color="#A855F7"/>
+    </linearGradient>
+
+    <radialGradient id="coinInnerGrad" cx="30%" cy="20%" r="90%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="45%" stop-color="#020617"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </radialGradient>
+
+    <linearGradient id="ttGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#E5E7EB"/>
+      <stop offset="50%" stop-color="#F9FAFB"/>
+      <stop offset="100%" stop-color="#94A3B8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Panel -->
+  <rect x="16" y="16" width="480" height="224" rx="32" fill="url(#panelGrad)"/>
+  <rect x="16" y="16" width="480" height="224" rx="32" stroke="#020617" stroke-width="2"/>
+
+  <!-- Glow -->
+  <ellipse cx="140" cy="128" rx="88" ry="80" fill="#22D3EE" opacity="0.4" filter="url(#softGlow)"/>
+
+  <!-- Moneta -->
+  <circle cx="140" cy="128" r="80" fill="none" stroke="url(#ringGrad)" stroke-width="8"/>
+  <circle cx="140" cy="128" r="68" fill="url(#coinInnerGrad)"/>
+  <circle cx="140" cy="128" r="68" fill="none" stroke="#0F172A" stroke-width="2"/>
+  <circle cx="140" cy="128" r="52" fill="none" stroke="#1F2937" stroke-width="2" opacity="0.9"/>
+
+  <!-- Heksagon -->
+  <path
+    d="M140 82 L178 104 L178 152 L140 174 L102 152 L102 104 Z"
+    fill="none"
+    stroke="#1E293B"
+    stroke-width="4"
+    stroke-linejoin="round"
+    opacity="0.9"
+  />
+
+  <!-- Monogram TT -->
+  <rect x="112" y="104" width="56" height="14" rx="7" fill="url(#ttGrad)"/>
+  <rect x="129" y="112" width="10" height="44" rx="5" fill="url(#ttGrad)"/>
+  <rect x="141" y="112" width="10" height="44" rx="5" fill="url(#ttGrad)" opacity="0.9"/>
+  <rect x="112" y="104" width="56" height="4" rx="2"
+        fill="url(#ringGrad)" opacity="0.9"/>
+
+  <!-- WORDMARK -->
+  <g transform="translate(230, 136)">
+    <text x="0" y="0"
+          font-family="'Space Grotesk', 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="32"
+          font-weight="700"
+          fill="url(#ttGrad)"
+          letter-spacing="1.4">
+      TrueTrust
+    </text>
+
+    <text x="2" y="22"
+          font-family="'Space Grotesk', 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="10"
+          font-weight="500"
+          fill="#64748B"
+          letter-spacing="4">
+      POST-QUANTUM COIN
+    </text>
+  </g>
+</svg>

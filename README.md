@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="True Trust Protocol" width="512">
+</p>
+
 # True Trust Protocol
 
 [![Rust](https://img.shields.io/badge/Rust-1.91%2B-orange?logo=rust)](https://www.rust-lang.org/)
