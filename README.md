@@ -1,6 +1,6 @@
 # True Trust Protocol
 
-[![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.91%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![PQC](https://img.shields.io/badge/Crypto-Post--Quantum-green)](https://csrc.nist.gov/projects/post-quantum-cryptography)
 [![Tests](https://img.shields.io/badge/Tests-126%20passing-brightgreen)]()
