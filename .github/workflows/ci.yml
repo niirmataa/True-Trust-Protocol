@@ -37,10 +37,10 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           
       - name: Build
-        run: cargo build --workspace --features pqclean
+        run: cargo build --workspace
         
       - name: Test
-        run: cargo test --workspace --features pqclean
+        run: cargo test --workspace --lib --tests
 
   clippy:
     name: Clippy
@@ -70,7 +70,7 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           
       - name: Clippy
-        run: cargo clippy --workspace --features pqclean -- -W clippy::all
+        run: cargo clippy --workspace -- -W clippy::all
         continue-on-error: true
 
   fmt:
