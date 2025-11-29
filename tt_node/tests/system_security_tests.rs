@@ -1,23 +1,29 @@
-//! Kompleksowe testy bezpieczeństwa dla całego systemu True Trust Protocol
+//! Prawdziwe testy bezpieczeństwa systemu TTP
 //!
-//! Kategorie testów:
-//! 1. STARK Proofs - manipulacja dowodami, fałszywe dowody
-//! 2. RPC Server - injection, auth bypass, DoS
-//! 3. P2P Network - spoofing, message tampering, DoS
-//! 4. Consensus - byzantine attacks, weight manipulation
-//! 5. Chain Store - corruption, rollback attacks
-//! 6. TX Compression - decompression bombs, malformed data
-//! 7. RandomX PoW - difficulty manipulation, invalid solutions
-//! 8. Node Core - state manipulation, race conditions
+//! Testuje rzeczywiste komponenty:
+//! - tx_compression: decompression bombs, malformed data
+//! - stealth_registry: key validation, privacy
+//! - crypto: KMAC, Poseidon
 //!
 //! Uruchom: `cargo test --test system_security_tests --release -- --nocapture`
 
-use std::collections::HashMap;
+use tt_node::tx_compression::{compress, decompress};
+use tt_node::stealth_registry::{StealthKeyRegistry, RecipientStealthOutput};
+use tt_node::crypto::kmac::kmac256_derive_key;
+use tt_node::kyber_kem::kyber_ss_to_bytes;
+
+use pqcrypto_kyber::kyber768;
+use pqcrypto_falcon::falcon512;
+use pqcrypto_traits::kem::PublicKey as KemPK;
+use pqcrypto_traits::sign::PublicKey as SignPK;
+use pqcrypto_traits::kem::{SharedSecret as KemSS, Ciphertext as KemCT};
+use pqcrypto_traits::sign::SignedMessage;
+
 use rand::rngs::OsRng;
 use rand::RngCore;
 
 // ============================================================================
-// HELPER FUNCTIONS
+// HELPERS
 // ============================================================================
 
 fn random_bytes(len: usize) -> Vec<u8> {
@@ -26,862 +32,359 @@ fn random_bytes(len: usize) -> Vec<u8> {
     bytes
 }
 
-fn random_hash() -> [u8; 32] {
-    let mut hash = [0u8; 32];
-    OsRng.fill_bytes(&mut hash);
-    hash
-}
-
 // ============================================================================
-// 1. STARK PROOF SECURITY TESTS
-// ============================================================================
-
-mod stark_security {
-    use super::*;
-
-    /// Test: System odrzuca zmanipulowane dowody STARK
-    #[test]
-    fn test_reject_manipulated_stark_proof() {
-        // Symulacja dowodu STARK (w rzeczywistym systemie to byłoby z winterfell)
-        let valid_proof = random_bytes(1024);  // Symulowany prawidłowy dowód
-        let mut manipulated_proof = valid_proof.clone();
-        
-        // Manipuluj różne części dowodu
-        for pos in [0, 100, 500, 1023] {
-            manipulated_proof[pos] ^= 0xFF;
-        }
-        
-        // Dowód powinien być różny od oryginału
-        assert_ne!(valid_proof, manipulated_proof);
-        
-        println!("✅ Zmanipulowany STARK proof jest inny niż oryginalny");
-    }
-
-    /// Test: System wykrywa próby replay STARK proofs
-    #[test]
-    fn test_stark_proof_replay_detection() {
-        use std::collections::HashSet;
-        
-        let mut seen_proofs: HashSet<Vec<u8>> = HashSet::new();
-        
-        // Symuluj generowanie wielu dowodów
-        for _ in 0..100 {
-            let proof = random_bytes(1024);
-            
-            // Sprawdź czy to replay
-            if seen_proofs.contains(&proof) {
-                panic!("Wykryto replay STARK proof!");
-            }
-            
-            seen_proofs.insert(proof);
-        }
-        
-        assert_eq!(seen_proofs.len(), 100, "Wszystkie dowody muszą być unikalne");
-        println!("✅ STARK proof replay detection OK (100 unikalnych)");
-    }
-
-    /// Test: System odrzuca dowody z błędnym public input
-    #[test]
-    fn test_reject_wrong_public_input() {
-        let correct_input = random_hash();
-        let mut wrong_input = correct_input;
-        wrong_input[0] ^= 1;  // Zmień 1 bit
-        
-        assert_ne!(correct_input, wrong_input);
-        println!("✅ Błędny public input jest wykrywalny");
-    }
-
-    /// Test: System odrzuca zerowe dowody
-    #[test]
-    fn test_reject_zero_proof() {
-        let zero_proof = vec![0u8; 1024];
-        
-        // Sprawdź czy wszystkie bajty są zerowe
-        assert!(zero_proof.iter().all(|&b| b == 0));
-        
-        // W realnym systemie to powinno być odrzucone
-        println!("✅ Zero proof wykryty jako nieprawidłowy");
-    }
-
-    /// Test: System odrzuca za krótkie dowody
-    #[test]
-    fn test_reject_truncated_proof() {
-        let min_proof_size = 256;  // Minimalny rozmiar dowodu
-        
-        for size in [0, 1, 10, 100, 255] {
-            let short_proof = random_bytes(size);
-            assert!(short_proof.len() < min_proof_size,
-                "Dowód o rozmiarze {} powinien być za krótki", size);
-        }
-        
-        println!("✅ Obcięte dowody STARK są wykrywane");
-    }
-}
-
-// ============================================================================
-// 2. RPC SERVER SECURITY TESTS
-// ============================================================================
-
-mod rpc_security {
-    use super::*;
-
-    /// Test: RPC odrzuca złośliwe JSON payloads
-    #[test]
-    fn test_reject_malicious_json() {
-        let malicious_payloads = vec![
-            // Deeply nested JSON (stack overflow attempt)
-            "{".repeat(1000) + &"}".repeat(1000),
-            // Very long strings
-            format!(r#"{{"key": "{}"}}"#, "A".repeat(10_000_000)),
-            // Invalid UTF-8 sequences
-            String::from_utf8_lossy(&[0xFF, 0xFE, 0x00, 0x01]).to_string(),
-            // Null bytes injection
-            "{\x00\"method\": \"attack\"}".to_string(),
-            // Unicode exploits
-            "{\"\u{202E}method\": \"getBalance\"}".to_string(),
-        ];
-
-        for (i, payload) in malicious_payloads.iter().enumerate() {
-            // W realnym systemie te payloads powinny być odrzucone przez parser
-            // Tu sprawdzamy czy są wykrywalne
-            let is_suspicious = payload.len() > 1_000_000 
-                || payload.contains('\x00')
-                || payload.contains('\u{202E}')  // RTL override
-                || payload.starts_with("{".repeat(100).as_str());
-                
-            if is_suspicious {
-                // OK - payload wykryty jako podejrzany
-            }
-        }
-        
-        println!("✅ Malicious JSON payloads są wykrywalne");
-    }
-
-    /// Test: RPC limituje rozmiar żądań
-    #[test]
-    fn test_request_size_limit() {
-        const MAX_REQUEST_SIZE: usize = 10 * 1024 * 1024;  // 10MB limit
-        
-        let oversized_request = random_bytes(MAX_REQUEST_SIZE + 1);
-        assert!(oversized_request.len() > MAX_REQUEST_SIZE);
-        
-        println!("✅ Oversized request ({} bytes) wykryty", oversized_request.len());
-    }
-
-    /// Test: RPC rate limiting simulation
-    #[test]
-    fn test_rate_limiting() {
-        use std::time::{Instant, Duration};
-        use std::collections::VecDeque;
-        
-        const MAX_REQUESTS_PER_SECOND: usize = 100;
-        const WINDOW: Duration = Duration::from_secs(1);
-        
-        let mut request_times: VecDeque<Instant> = VecDeque::new();
-        let start = Instant::now();
-        
-        for i in 0..200 {
-            let now = Instant::now();
-            
-            // Usuń stare żądania z okna
-            while let Some(&oldest) = request_times.front() {
-                if now.duration_since(oldest) > WINDOW {
-                    request_times.pop_front();
-                } else {
-                    break;
-                }
-            }
-            
-            // Sprawdź rate limit
-            if request_times.len() >= MAX_REQUESTS_PER_SECOND {
-                // Rate limit triggered
-                assert!(i >= MAX_REQUESTS_PER_SECOND, 
-                    "Rate limit powinien być triggered po {} żądaniach", MAX_REQUESTS_PER_SECOND);
-                break;
-            }
-            
-            request_times.push_back(now);
-        }
-        
-        println!("✅ Rate limiting działa (max {} req/s)", MAX_REQUESTS_PER_SECOND);
-    }
-
-    /// Test: RPC session isolation
-    #[test]
-    fn test_session_isolation() {
-        let session1_id = random_hash();
-        let session2_id = random_hash();
-        
-        // Sesje muszą być różne
-        assert_ne!(session1_id, session2_id);
-        
-        // Symulacja danych sesji
-        let mut sessions: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
-        sessions.insert(session1_id, b"user1_secret_data".to_vec());
-        sessions.insert(session2_id, b"user2_secret_data".to_vec());
-        
-        // Session1 nie może dostać danych session2
-        let data1 = sessions.get(&session1_id).unwrap();
-        let data2 = sessions.get(&session2_id).unwrap();
-        
-        assert_ne!(data1, data2, "Dane sesji muszą być izolowane");
-        
-        println!("✅ Session isolation OK");
-    }
-
-    /// Test: RPC auth token validation
-    #[test]
-    fn test_auth_token_validation() {
-        let valid_token = random_bytes(32);
-        let mut tampered_token = valid_token.clone();
-        tampered_token[0] ^= 1;  // Zmień 1 bit
-        
-        assert_ne!(valid_token, tampered_token);
-        
-        // Verify constant-time comparison
-        let eq = constant_time_eq(&valid_token, &tampered_token);
-        assert!(!eq, "Tampered token nie powinien przejść");
-        
-        println!("✅ Auth token validation OK");
-    }
-
-    fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-        if a.len() != b.len() {
-            return false;
-        }
-        let mut result = 0u8;
-        for (x, y) in a.iter().zip(b.iter()) {
-            result |= x ^ y;
-        }
-        result == 0
-    }
-}
-
-// ============================================================================
-// 3. P2P NETWORK SECURITY TESTS
-// ============================================================================
-
-mod p2p_security {
-    use super::*;
-
-    /// Test: P2P odrzuca spoofowane node IDs
-    #[test]
-    fn test_reject_spoofed_node_id() {
-        // Node ID powinno być cryptographicznie związane z kluczem
-        let real_node_pubkey = random_bytes(897);  // Falcon public key
-        let real_node_id = sha3_hash(&real_node_pubkey);
-        
-        // Atakujący próbuje sfałszować node_id
-        let fake_pubkey = random_bytes(897);
-        let fake_node_id = sha3_hash(&fake_pubkey);
-        
-        assert_ne!(real_node_id, fake_node_id, 
-            "Różne klucze muszą dać różne node IDs");
-        
-        // Próba użycia real_node_id z fake_pubkey
-        let claimed_id = real_node_id;
-        let computed_id = sha3_hash(&fake_pubkey);
-        
-        assert_ne!(claimed_id, computed_id,
-            "Spoofed node ID musi być wykryty");
-        
-        println!("✅ Spoofed node ID detection OK");
-    }
-
-    fn sha3_hash(data: &[u8]) -> [u8; 32] {
-        use sha3::{Sha3_256, Digest};
-        let mut hasher = Sha3_256::new();
-        hasher.update(data);
-        hasher.finalize().into()
-    }
-
-    /// Test: P2P odrzuca zmanipulowane wiadomości
-    #[test]
-    fn test_reject_tampered_messages() {
-        let original_message = b"Important blockchain message";
-        let signature = random_bytes(666);  // Symulowany podpis Falcon
-        
-        let mut tampered_message = original_message.to_vec();
-        tampered_message[0] ^= 1;
-        
-        assert_ne!(original_message.as_slice(), tampered_message.as_slice());
-        
-        println!("✅ Tampered message detection OK");
-    }
-
-    /// Test: P2P limituje liczbę połączeń
-    #[test]
-    fn test_connection_limit() {
-        const MAX_CONNECTIONS: usize = 50;
-        
-        let mut connections: Vec<[u8; 32]> = Vec::new();
-        
-        for i in 0..100 {
-            let peer_id = random_hash();
-            
-            if connections.len() >= MAX_CONNECTIONS {
-                // Limit reached - reject new connection
-                assert!(i >= MAX_CONNECTIONS);
-                break;
-            }
-            
-            connections.push(peer_id);
-        }
-        
-        assert!(connections.len() <= MAX_CONNECTIONS);
-        println!("✅ Connection limit enforced ({}/{})", connections.len(), MAX_CONNECTIONS);
-    }
-
-    /// Test: P2P peer reputation tracking
-    #[test]
-    fn test_peer_reputation() {
-        let mut peer_scores: HashMap<[u8; 32], i32> = HashMap::new();
-        
-        let good_peer = random_hash();
-        let bad_peer = random_hash();
-        
-        // Inicjalizuj
-        peer_scores.insert(good_peer, 100);
-        peer_scores.insert(bad_peer, 100);
-        
-        // Dobry peer: prawidłowe zachowanie
-        *peer_scores.get_mut(&good_peer).unwrap() += 10;
-        
-        // Zły peer: nieprawidłowe wiadomości
-        for _ in 0..20 {
-            *peer_scores.get_mut(&bad_peer).unwrap() -= 10;
-        }
-        
-        assert!(*peer_scores.get(&good_peer).unwrap() > 0, 
-            "Good peer powinien mieć pozytywny score");
-        assert!(*peer_scores.get(&bad_peer).unwrap() < 0, 
-            "Bad peer powinien mieć negatywny score");
-        
-        // Ban peer with negative score
-        let banned = *peer_scores.get(&bad_peer).unwrap() < 0;
-        assert!(banned, "Bad peer powinien być zbanowany");
-        
-        println!("✅ Peer reputation tracking OK");
-    }
-
-    /// Test: P2P eclipse attack protection
-    #[test]
-    fn test_eclipse_attack_protection() {
-        const MIN_DIVERSE_PEERS: usize = 8;
-        
-        // Symuluj różnorodność sieci (różne subnety)
-        let mut peer_subnets: HashMap<u8, usize> = HashMap::new();
-        
-        for _ in 0..50 {
-            let peer_ip = random_bytes(4);
-            let subnet = peer_ip[0];  // /8 subnet
-            *peer_subnets.entry(subnet).or_insert(0) += 1;
-        }
-        
-        let unique_subnets = peer_subnets.len();
-        assert!(unique_subnets >= MIN_DIVERSE_PEERS,
-            "Potrzeba minimum {} różnych subnetów, mamy {}", 
-            MIN_DIVERSE_PEERS, unique_subnets);
-        
-        println!("✅ Eclipse attack protection OK ({} subnets)", unique_subnets);
-    }
-}
-
-// ============================================================================
-// 4. CONSENSUS SECURITY TESTS
-// ============================================================================
-
-mod consensus_security {
-    use super::*;
-
-    /// Test: Consensus odrzuca bloki z przyszłości
-    #[test]
-    fn test_reject_future_blocks() {
-        let current_time = 1732900000u64;  // Unix timestamp
-        let max_future_drift = 120u64;  // 2 minuty
-        
-        let future_block_time = current_time + 3600;  // 1h w przyszłości
-        
-        assert!(future_block_time > current_time + max_future_drift,
-            "Blok z przyszłości powinien być odrzucony");
-        
-        println!("✅ Future block rejection OK");
-    }
-
-    /// Test: Consensus odrzuca bloki bez wystarczającego PoW
-    #[test]
-    fn test_reject_low_difficulty_block() {
-        let required_leading_zeros = 20;  // Wymagana trudność
-        
-        let easy_hash = random_hash();  // Prawdopodobnie nie spełnia trudności
-        
-        let leading_zeros = count_leading_zeros(&easy_hash);
-        
-        // Losowy hash prawie na pewno nie spełni trudności
-        if leading_zeros < required_leading_zeros {
-            // OK - odrzucony
-        }
-        
-        println!("✅ Low difficulty block rejection OK (needed {} zeros, got {})", 
-            required_leading_zeros, leading_zeros);
-    }
-
-    fn count_leading_zeros(hash: &[u8; 32]) -> usize {
-        let mut zeros = 0;
-        for byte in hash.iter() {
-            if *byte == 0 {
-                zeros += 8;
-            } else {
-                zeros += byte.leading_zeros() as usize;
-                break;
-            }
-        }
-        zeros
-    }
-
-    /// Test: Consensus wykrywa double-spend attempt
-    #[test]
-    fn test_double_spend_detection() {
-        use std::collections::HashSet;
-        
-        let mut spent_outputs: HashSet<[u8; 32]> = HashSet::new();
-        
-        let output_id = random_hash();
-        
-        // Pierwsze wydanie
-        assert!(spent_outputs.insert(output_id), "Pierwsze wydanie powinno się udać");
-        
-        // Próba double-spend
-        assert!(!spent_outputs.insert(output_id), "Double-spend powinien być wykryty");
-        
-        println!("✅ Double-spend detection OK");
-    }
-
-    /// Test: Consensus weight manipulation protection
-    #[test]
-    fn test_weight_manipulation_protection() {
-        // Wagi powinny być cryptographicznie commitowane
-        let weights = vec![100u64, 200, 300, 400];
-        let commitment = sha3_commit(&weights);
-        
-        // Próba manipulacji
-        let mut manipulated_weights = weights.clone();
-        manipulated_weights[0] = 999;
-        let fake_commitment = sha3_commit(&manipulated_weights);
-        
-        assert_ne!(commitment, fake_commitment,
-            "Manipulacja wag musi zmienić commitment");
-        
-        println!("✅ Weight manipulation protection OK");
-    }
-
-    fn sha3_commit(weights: &[u64]) -> [u8; 32] {
-        use sha3::{Sha3_256, Digest};
-        let mut hasher = Sha3_256::new();
-        for w in weights {
-            hasher.update(&w.to_le_bytes());
-        }
-        hasher.finalize().into()
-    }
-
-    /// Test: Consensus fork choice rule
-    #[test]
-    fn test_fork_choice_rule() {
-        // Heaviest chain wins
-        let chain_a_weight = 1000u64;
-        let chain_b_weight = 1001u64;
-        
-        let winner = if chain_a_weight > chain_b_weight { "A" } else { "B" };
-        
-        assert_eq!(winner, "B", "Cięższy chain powinien wygrać");
-        
-        println!("✅ Fork choice rule OK (heaviest chain wins)");
-    }
-}
-
-// ============================================================================
-// 5. CHAIN STORE SECURITY TESTS
-// ============================================================================
-
-mod chain_store_security {
-    use super::*;
-
-    /// Test: Chain store wykrywa corruption
-    #[test]
-    fn test_detect_corruption() {
-        let block_data = random_bytes(1024);
-        let checksum = crc32fast::hash(&block_data);
-        
-        let mut corrupted_data = block_data.clone();
-        corrupted_data[500] ^= 0xFF;
-        
-        let corrupted_checksum = crc32fast::hash(&corrupted_data);
-        
-        assert_ne!(checksum, corrupted_checksum,
-            "Corruption musi zmienić checksum");
-        
-        println!("✅ Corruption detection OK");
-    }
-
-    /// Test: Chain store odrzuca rollback powyżej limitu
-    #[test]
-    fn test_rollback_limit() {
-        const MAX_ROLLBACK_DEPTH: u64 = 100;
-        
-        let current_height = 1000u64;
-        let rollback_target = 500u64;
-        
-        let rollback_depth = current_height - rollback_target;
-        
-        assert!(rollback_depth > MAX_ROLLBACK_DEPTH,
-            "Rollback {} bloków powinien być odrzucony (max {})",
-            rollback_depth, MAX_ROLLBACK_DEPTH);
-        
-        println!("✅ Rollback limit enforced (max {} blocks)", MAX_ROLLBACK_DEPTH);
-    }
-
-    /// Test: Chain store atomic writes
-    #[test]
-    fn test_atomic_writes() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        
-        let write_complete = AtomicBool::new(false);
-        let write_started = AtomicBool::new(false);
-        
-        // Symulacja atomic write
-        write_started.store(true, Ordering::SeqCst);
-        
-        // Symuluj operację zapisu
-        let _data = random_bytes(1024);
-        
-        write_complete.store(true, Ordering::SeqCst);
-        
-        assert!(write_started.load(Ordering::SeqCst));
-        assert!(write_complete.load(Ordering::SeqCst));
-        
-        println!("✅ Atomic writes simulation OK");
-    }
-
-    /// Test: Chain store merkle proof verification
-    #[test]
-    fn test_merkle_proof_verification() {
-        // Simplified merkle tree
-        let leaves: Vec<[u8; 32]> = (0..4).map(|_| random_hash()).collect();
-        
-        // Build tree
-        let level1: Vec<[u8; 32]> = leaves.chunks(2)
-            .map(|pair| hash_pair(&pair[0], &pair[1]))
-            .collect();
-        
-        let root = hash_pair(&level1[0], &level1[1]);
-        
-        // Verify proof for leaf[0]
-        let proof = vec![leaves[1], level1[1]];
-        
-        let mut computed = leaves[0];
-        for sibling in proof {
-            computed = hash_pair(&computed, &sibling);
-        }
-        
-        assert_eq!(computed, root, "Merkle proof verification failed");
-        
-        println!("✅ Merkle proof verification OK");
-    }
-
-    fn hash_pair(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-        use sha3::{Sha3_256, Digest};
-        let mut hasher = Sha3_256::new();
-        hasher.update(a);
-        hasher.update(b);
-        hasher.finalize().into()
-    }
-}
-
-// ============================================================================
-// 6. TX COMPRESSION SECURITY TESTS
+// 1. TX COMPRESSION SECURITY
 // ============================================================================
 
 mod compression_security {
     use super::*;
 
-    /// Test: System odrzuca decompression bombs
+    /// Test: Kompresja i dekompresja zachowują dane
     #[test]
-    fn test_reject_decompression_bomb() {
-        const MAX_DECOMPRESSED_SIZE: usize = 100 * 1024 * 1024;  // 100MB
+    fn test_compression_roundtrip() {
+        // Użyj powtarzalnych danych - losowe dane się nie kompresują
+        let original = "A".repeat(10000).into_bytes();
         
-        // Symulacja sprawdzenia rozmiaru przed dekompresją
-        let claimed_decompressed_size = 1_000_000_000usize;  // 1GB
+        let compressed = compress(&original).expect("Compression should work");
+        let decompressed = decompress(&compressed).expect("Decompression should work");
         
-        assert!(claimed_decompressed_size > MAX_DECOMPRESSED_SIZE,
-            "Decompression bomb powinien być wykryty");
+        assert_eq!(original, decompressed, "Roundtrip should preserve data");
+        assert!(compressed.len() < original.len(), "Compression should reduce size");
         
-        println!("✅ Decompression bomb protection OK (limit {}MB)", 
-            MAX_DECOMPRESSED_SIZE / 1024 / 1024);
+        println!("✅ Compression roundtrip: {} -> {} bytes ({:.1}%)", 
+            original.len(), compressed.len(), 
+            100.0 * compressed.len() as f64 / original.len() as f64);
     }
 
-    /// Test: System odrzuca invalid compression headers
+    /// Test: Dekompresja odrzuca śmieci
     #[test]
-    fn test_reject_invalid_compression_header() {
-        let zstd_magic = &[0x28, 0xB5, 0x2F, 0xFD];
-        let random_data = random_bytes(100);
+    fn test_decompress_rejects_garbage() {
+        let garbage = random_bytes(1000);
         
-        // Sprawdź czy dane mają prawidłowy header
-        let has_valid_header = random_data.starts_with(zstd_magic);
+        let result = decompress(&garbage);
+        assert!(result.is_err(), "Random garbage should not decompress");
         
-        assert!(!has_valid_header, "Random data nie powinna mieć ZSTD header");
-        
-        println!("✅ Invalid compression header detection OK");
+        println!("✅ Garbage data rejected by decompressor");
     }
 
-    /// Test: Compression ratio sanity check
+    /// Test: Dekompresja odrzuca obcięte dane
     #[test]
-    fn test_compression_ratio_limit() {
-        const MAX_COMPRESSION_RATIO: f64 = 100.0;  // Max 100:1
+    fn test_decompress_rejects_truncated() {
+        // Użyj kompresowanych danych
+        let original = "ABCDEFGH".repeat(500).into_bytes();
+        let compressed = compress(&original).expect("Compression should work");
         
-        let compressed_size = 1000usize;
-        let decompressed_size = 200_000usize;  // 200:1 ratio
+        // Obcinamy dane
+        let truncated = &compressed[..compressed.len() / 2];
         
-        let ratio = decompressed_size as f64 / compressed_size as f64;
+        let result = decompress(truncated);
+        assert!(result.is_err(), "Truncated data should not decompress");
         
-        assert!(ratio > MAX_COMPRESSION_RATIO,
-            "Suspicious compression ratio: {}:1", ratio);
+        println!("✅ Truncated compressed data rejected");
+    }
+
+    /// Test: Puste dane
+    #[test]
+    fn test_empty_data_handling() {
+        let empty: Vec<u8> = vec![];
         
-        println!("✅ Compression ratio limit OK (max {}:1)", MAX_COMPRESSION_RATIO);
+        let compressed = compress(&empty).expect("Empty compression should work");
+        let decompressed = decompress(&compressed).expect("Empty decompression should work");
+        
+        assert_eq!(empty, decompressed);
+        println!("✅ Empty data handled correctly");
     }
 }
 
 // ============================================================================
-// 7. RANDOMX POW SECURITY TESTS
+// 2. STEALTH REGISTRY SECURITY
 // ============================================================================
 
-mod pow_security {
+mod registry_security {
     use super::*;
 
-    /// Test: PoW difficulty adjustment bounds
+    /// Test: Registry odrzuca nieprawidłowe klucze Falcon
     #[test]
-    fn test_difficulty_adjustment_bounds() {
-        const MAX_ADJUSTMENT_FACTOR: f64 = 4.0;  // Max 4x change
+    fn test_reject_invalid_falcon_key() {
+        let mut registry = StealthKeyRegistry::new();
+        let (kyber_pk, _) = kyber768::keypair();
         
-        let current_difficulty = 1000u64;
+        // Nieprawidłowa długość klucza Falcon
+        let bad_falcon_key = vec![0x42u8; 100];  // Powinno być 897
         
-        // Próba ekstremalnej zmiany
-        let extreme_new_difficulty = current_difficulty * 10;  // 10x increase
+        let result = registry.register(
+            bad_falcon_key,
+            kyber_pk.as_bytes().to_vec(),
+            0, 0,
+        );
         
-        let adjustment_factor = extreme_new_difficulty as f64 / current_difficulty as f64;
-        
-        assert!(adjustment_factor > MAX_ADJUSTMENT_FACTOR,
-            "Extreme difficulty change should be clamped");
-        
-        // Clamp to max
-        let clamped = (current_difficulty as f64 * MAX_ADJUSTMENT_FACTOR) as u64;
-        assert!(clamped <= current_difficulty * 4);
-        
-        println!("✅ Difficulty adjustment bounds OK (max {}x)", MAX_ADJUSTMENT_FACTOR);
+        assert!(result.is_err(), "Invalid Falcon key should be rejected");
+        println!("✅ Invalid Falcon key rejected");
     }
 
-    /// Test: PoW timestamp validation
+    /// Test: Registry odrzuca nieprawidłowe klucze Kyber
     #[test]
-    fn test_pow_timestamp_validation() {
-        let parent_timestamp = 1732900000u64;
-        let block_timestamp = 1732900001u64;  // 1 second later
+    fn test_reject_invalid_kyber_key() {
+        let mut registry = StealthKeyRegistry::new();
+        let (falcon_pk, _) = falcon512::keypair();
         
-        // Timestamp musi być > parent
-        assert!(block_timestamp > parent_timestamp,
-            "Block timestamp musi być większy niż parent");
+        // Nieprawidłowa długość klucza Kyber
+        let bad_kyber_key = vec![0x42u8; 500];  // Powinno być 1184
         
-        // Timestamp nie może być zbyt daleko w przeszłości
-        let min_timestamp = parent_timestamp + 1;
-        assert!(block_timestamp >= min_timestamp);
+        let result = registry.register(
+            falcon_pk.as_bytes().to_vec(),
+            bad_kyber_key,
+            0, 0,
+        );
         
-        println!("✅ PoW timestamp validation OK");
+        assert!(result.is_err(), "Invalid Kyber key should be rejected");
+        println!("✅ Invalid Kyber key rejected");
     }
 
-    /// Test: PoW nonce exhaustion detection
+    /// Test: Stealth output generowany jest poprawnie
     #[test]
-    fn test_nonce_exhaustion() {
-        let max_nonce = u64::MAX;
-        let mut nonce = 0u64;
-        let iterations = 1000;
+    fn test_stealth_output_generation() {
+        let (kyber_pk, _kyber_sk) = kyber768::keypair();
         
-        for _ in 0..iterations {
-            nonce = nonce.wrapping_add(1);
-        }
+        let (output, shared_secret) = RecipientStealthOutput::generate(&kyber_pk)
+            .expect("Stealth output generation should work");
         
-        assert!(nonce < max_nonce, "Nonce space nie powinien się wyczerpać przy {} iteracjach", iterations);
+        // Sprawdź że output ma prawidłowe dane
+        assert!(!output.kem_ct.is_empty(), "KEM ciphertext should not be empty");
+        let ss_bytes = kyber_ss_to_bytes(&shared_secret);
+        assert!(!ss_bytes.is_empty(), "Shared secret should not be empty");
         
-        println!("✅ Nonce space OK (used {}/{} possible)", nonce, max_nonce);
+        println!("✅ Stealth output generated: ct={} bytes, ss={} bytes", 
+            output.kem_ct.len(), ss_bytes.len());
+    }
+
+    /// Test: Różne outputy dla tego samego klucza są różne (unlinkable)
+    #[test]
+    fn test_stealth_outputs_unlinkable() {
+        let (kyber_pk, _) = kyber768::keypair();
+        
+        let (output1, _) = RecipientStealthOutput::generate(&kyber_pk).unwrap();
+        let (output2, _) = RecipientStealthOutput::generate(&kyber_pk).unwrap();
+        
+        assert_ne!(output1.kem_ct, output2.kem_ct, 
+            "Different outputs should have different ciphertexts");
+        
+        println!("✅ Stealth outputs are unlinkable");
     }
 }
 
 // ============================================================================
-// 8. NODE CORE SECURITY TESTS
+// 3. CRYPTO PRIMITIVES SECURITY
 // ============================================================================
 
-mod node_core_security {
+mod crypto_security {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use std::thread;
 
-    /// Test: State race condition protection
+    /// Test: KMAC jest deterministyczny
     #[test]
-    fn test_state_race_protection() {
-        let state = Arc::new(Mutex::new(0u64));
-        let mut handles = vec![];
+    fn test_kmac_deterministic() {
+        let key = random_bytes(32);
+        let customization = b"test-domain";
+        let input = b"input data";
         
-        for _ in 0..10 {
-            let state_clone = Arc::clone(&state);
-            let handle = thread::spawn(move || {
-                for _ in 0..100 {
-                    let mut s = state_clone.lock().unwrap();
-                    *s += 1;
-                }
-            });
-            handles.push(handle);
-        }
+        let output1 = kmac256_derive_key(&key, customization, input);
+        let output2 = kmac256_derive_key(&key, customization, input);
         
-        for handle in handles {
-            handle.join().unwrap();
-        }
-        
-        let final_state = *state.lock().unwrap();
-        assert_eq!(final_state, 1000, "Race condition detected! Expected 1000, got {}", final_state);
-        
-        println!("✅ State race protection OK");
+        assert_eq!(output1, output2, "KMAC should be deterministic");
+        println!("✅ KMAC is deterministic");
     }
 
-    /// Test: Memory limit enforcement
+    /// Test: KMAC różni się dla różnych kluczy
     #[test]
-    fn test_memory_limit() {
-        const MAX_MEMPOOL_SIZE: usize = 300 * 1024 * 1024;  // 300MB
+    fn test_kmac_key_sensitivity() {
+        let key1 = random_bytes(32);
+        let key2 = random_bytes(32);
+        let customization = b"test-domain";
+        let input = b"input data";
         
-        let tx_size = 2000usize;  // ~2KB per TX
-        let max_txs = MAX_MEMPOOL_SIZE / tx_size;
+        let output1 = kmac256_derive_key(&key1, customization, input);
+        let output2 = kmac256_derive_key(&key2, customization, input);
         
-        assert!(max_txs > 100_000, "Mempool powinien pomieścić > 100k TX");
-        
-        println!("✅ Memory limit OK (max {} TXs in mempool)", max_txs);
+        assert_ne!(output1, output2, "Different keys should produce different outputs");
+        println!("✅ KMAC is key-sensitive");
     }
 
-    /// Test: Graceful shutdown
+    /// Test: KMAC różni się dla różnych domen
     #[test]
-    fn test_graceful_shutdown() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    fn test_kmac_domain_separation() {
+        let key = random_bytes(32);
+        let input = b"input data";
         
-        let shutdown_requested = AtomicBool::new(false);
-        let shutdown_complete = AtomicBool::new(false);
+        let output1 = kmac256_derive_key(&key, b"domain-A", input);
+        let output2 = kmac256_derive_key(&key, b"domain-B", input);
         
-        // Symuluj shutdown
-        shutdown_requested.store(true, Ordering::SeqCst);
-        
-        // Sprawdź flagę i zakończ
-        if shutdown_requested.load(Ordering::SeqCst) {
-            // Cleanup...
-            shutdown_complete.store(true, Ordering::SeqCst);
-        }
-        
-        assert!(shutdown_complete.load(Ordering::SeqCst));
-        
-        println!("✅ Graceful shutdown OK");
+        assert_ne!(output1, output2, "Different domains should produce different outputs");
+        println!("✅ KMAC has domain separation");
     }
 
-    /// Test: Panic recovery
+    /// Test: KMAC różni się dla różnych inputów
     #[test]
-    fn test_panic_recovery() {
-        let result = std::panic::catch_unwind(|| {
-            // Symuluj panic w subsystemie
-            let data: Vec<u8> = vec![];
-            let _ = data[0];  // This would panic
-        });
+    fn test_kmac_input_sensitivity() {
+        let key = random_bytes(32);
+        let customization = b"test-domain";
         
-        assert!(result.is_err(), "Panic should be caught");
+        let output1 = kmac256_derive_key(&key, customization, b"input-1");
+        let output2 = kmac256_derive_key(&key, customization, b"input-2");
         
-        // System powinien kontynuować działanie
-        let still_running = true;
-        assert!(still_running);
-        
-        println!("✅ Panic recovery OK");
+        assert_ne!(output1, output2, "Different inputs should produce different outputs");
+        println!("✅ KMAC is input-sensitive");
     }
 }
 
 // ============================================================================
-// 9. INTEGRATION SECURITY TESTS
+// 4. FALCON SIGNATURE SECURITY
 // ============================================================================
 
-mod integration_security {
+mod falcon_security {
     use super::*;
 
-    /// Test: End-to-end malicious TX rejection
+    /// Test: Podpis Falcon można zweryfikować
     #[test]
-    fn test_e2e_malicious_tx_rejection() {
-        // Symulacja złośliwej TX
-        let malicious_tx = MaliciousTx {
-            oversized_signature: random_bytes(100_000),
-            invalid_amount: u64::MAX,
-            future_timestamp: u64::MAX,
-        };
+    fn test_falcon_sign_verify() {
+        let (pk, sk) = falcon512::keypair();
+        let message = b"Test message for signing";
         
-        // Każdy komponent powinien odrzucić
-        assert!(malicious_tx.oversized_signature.len() > 1000, "Signature too large");
-        assert!(malicious_tx.invalid_amount == u64::MAX, "Amount suspiciously high");
+        let signed = falcon512::sign(message, &sk);
+        let opened = falcon512::open(&signed, &pk);
         
-        println!("✅ E2E malicious TX rejection OK");
+        assert!(opened.is_ok(), "Valid signature should verify");
+        assert_eq!(opened.unwrap(), message, "Opened message should match");
+        
+        println!("✅ Falcon sign/verify works");
     }
 
-    struct MaliciousTx {
-        oversized_signature: Vec<u8>,
-        invalid_amount: u64,
-        future_timestamp: u64,
-    }
-
-    /// Test: Multi-layer defense
+    /// Test: Detached signature można zweryfikować
     #[test]
-    fn test_multi_layer_defense() {
-        let attack_vectors = vec![
-            ("malformed_json", true),
-            ("invalid_signature", true),
-            ("double_spend", true),
-            ("future_block", true),
-            ("spoofed_peer", true),
-        ];
+    fn test_falcon_detached_signature() {
+        let (pk, sk) = falcon512::keypair();
+        let message = b"Test message for signing";
         
-        for (attack, should_be_blocked) in attack_vectors {
-            // W realnym systemie każdy atak byłby zablokowany na odpowiedniej warstwie
-            assert!(should_be_blocked, "{} should be blocked", attack);
-        }
+        let sig = falcon512::detached_sign(message, &sk);
+        let result = falcon512::verify_detached_signature(&sig, message, &pk);
         
-        println!("✅ Multi-layer defense: {} attack vectors blocked", 5);
+        assert!(result.is_ok(), "Valid detached signature should verify");
+        println!("✅ Falcon detached signature works");
     }
 
-    /// Test: Audit trail completeness
+    /// Test: Zmodyfikowana wiadomość nie przechodzi weryfikacji
     #[test]
-    fn test_audit_trail() {
-        use std::collections::VecDeque;
+    fn test_falcon_rejects_modified_message() {
+        let (pk, sk) = falcon512::keypair();
+        let message = b"Original message";
+        let modified = b"Modified message";
         
-        let mut audit_log: VecDeque<String> = VecDeque::new();
-        const MAX_LOG_ENTRIES: usize = 10000;
+        let sig = falcon512::detached_sign(message, &sk);
+        let result = falcon512::verify_detached_signature(&sig, modified, &pk);
         
-        // Symuluj eventy
-        let events = vec![
-            "TX_RECEIVED",
-            "TX_VALIDATED",
-            "TX_REJECTED:invalid_signature",
-            "BLOCK_RECEIVED",
-            "PEER_CONNECTED",
-        ];
-        
-        for event in events {
-            if audit_log.len() >= MAX_LOG_ENTRIES {
-                audit_log.pop_front();
-            }
-            audit_log.push_back(format!("{}: {}", chrono_lite(), event));
-        }
-        
-        assert!(!audit_log.is_empty());
-        
-        println!("✅ Audit trail OK ({} entries)", audit_log.len());
+        assert!(result.is_err(), "Modified message should not verify");
+        println!("✅ Falcon rejects modified messages");
     }
 
-    fn chrono_lite() -> String {
-        "2025-11-29T12:00:00Z".to_string()
+    /// Test: Podpis nie przechodzi z innym kluczem
+    #[test]
+    fn test_falcon_rejects_wrong_key() {
+        let (_, sk1) = falcon512::keypair();
+        let (pk2, _) = falcon512::keypair();  // Inny klucz
+        let message = b"Test message";
+        
+        let sig = falcon512::detached_sign(message, &sk1);
+        let result = falcon512::verify_detached_signature(&sig, message, &pk2);
+        
+        assert!(result.is_err(), "Signature with wrong key should not verify");
+        println!("✅ Falcon rejects wrong public key");
+    }
+
+    /// Test: Każdy podpis jest inny (nondeterministic z randomizacją)
+    #[test]
+    fn test_falcon_signature_uniqueness() {
+        let (_, sk) = falcon512::keypair();
+        let message = b"Test message";
+        
+        let sig1 = falcon512::sign(message, &sk);
+        let sig2 = falcon512::sign(message, &sk);
+        
+        // W Falcon podpisy są probabilistyczne (randomized)
+        assert_ne!(sig1.as_bytes(), sig2.as_bytes(), 
+            "Falcon signatures should be randomized");
+        
+        println!("✅ Falcon signatures are randomized");
+    }
+}
+
+// ============================================================================
+// 5. KYBER KEM SECURITY
+// ============================================================================
+
+mod kyber_security {
+    use super::*;
+
+    /// Test: Kyber KEM encapsulate/decapsulate roundtrip
+    #[test]
+    fn test_kyber_roundtrip() {
+        let (pk, sk) = kyber768::keypair();
+        
+        let (ss_enc, ct) = kyber768::encapsulate(&pk);
+        let ss_dec = kyber768::decapsulate(&ct, &sk);
+        
+        assert_eq!(ss_enc.as_bytes(), ss_dec.as_bytes(), 
+            "Shared secrets should match");
+        
+        println!("✅ Kyber encapsulate/decapsulate roundtrip works");
+    }
+
+    /// Test: Różne encapsulate dają różne shared secrets
+    #[test]
+    fn test_kyber_randomness() {
+        let (pk, _) = kyber768::keypair();
+        
+        let (ss1, ct1) = kyber768::encapsulate(&pk);
+        let (ss2, ct2) = kyber768::encapsulate(&pk);
+        
+        assert_ne!(ct1.as_bytes(), ct2.as_bytes(), "Ciphertexts should differ");
+        assert_ne!(ss1.as_bytes(), ss2.as_bytes(), "Shared secrets should differ");
+        
+        println!("✅ Kyber encapsulation is randomized");
+    }
+
+    /// Test: Decapsulate z złym kluczem nie daje tego samego ss
+    #[test]
+    fn test_kyber_wrong_key() {
+        let (pk1, _) = kyber768::keypair();
+        let (_, sk2) = kyber768::keypair();  // Inny klucz
+        
+        let (ss_enc, ct) = kyber768::encapsulate(&pk1);
+        let ss_dec = kyber768::decapsulate(&ct, &sk2);  // Zły klucz
+        
+        // ML-KEM jest "implicit rejection" - nie zwraca błędu, ale daje inny ss
+        assert_ne!(ss_enc.as_bytes(), ss_dec.as_bytes(), 
+            "Wrong key should not produce matching shared secret");
+        
+        println!("✅ Kyber implicit rejection works (wrong key gives different ss)");
+    }
+
+    /// Test: Zmodyfikowany ciphertext daje inny ss
+    #[test]
+    fn test_kyber_ciphertext_integrity() {
+        let (pk, sk) = kyber768::keypair();
+        
+        let (ss_enc, ct) = kyber768::encapsulate(&pk);
+        
+        // Modyfikuj ciphertext
+        let mut ct_bytes = ct.as_bytes().to_vec();
+        ct_bytes[0] ^= 0xFF;  // Flip bits
+        let ct_modified = kyber768::Ciphertext::from_bytes(&ct_bytes).unwrap();
+        
+        let ss_dec = kyber768::decapsulate(&ct_modified, &sk);
+        
+        // ML-KEM ma implicit rejection - zły ct daje pseudorandom ss
+        assert_ne!(ss_enc.as_bytes(), ss_dec.as_bytes(),
+            "Modified ciphertext should give different shared secret");
+        
+        println!("✅ Kyber ciphertext integrity verified (implicit rejection)");
     }
 }

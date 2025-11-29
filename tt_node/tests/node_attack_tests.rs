@@ -1,47 +1,30 @@
-//! Testy bezpieczeństwa na poziomie węzła - ataki na consensus, stake i trust
+//! Prawdziwe testy ataków na węzeł TTP
 //!
-//! Pokrywa scenariusze ataków gdzie złośliwy węzeł próbuje:
-//! 1. Fałszować bloki (fake block production)
-//! 2. Manipulować stake'iem (stake grinding, nothing-at-stake)
-//! 3. Podrabiać trust (Sybil attack, vouch manipulation)
-//! 4. Ataki na leader selection (grinding, prediction)
-//! 5. Fork attacks (long-range, short-range)
-//! 6. Censorship attacks (transaction exclusion)
-//! 7. MEV exploitation (front-running, sandwich)
-//! 8. Slashing evasion
+//! Testuje rzeczywiste funkcje z tt_node:
+//! - ConsensusPro: sybil attacks, stake manipulation, leader selection
+//! - TrustGraph: vouch manipulation, trust grinding
+//! - Falcon signatures (via pqcrypto directly)
 //!
 //! Uruchom: `cargo test --test node_attack_tests --release -- --nocapture`
 
-use std::collections::{HashMap, HashSet};
+use tt_node::consensus_pro::{ConsensusPro, ValidatorId};
+use tt_node::rtt_pro::{TrustGraph, RTTConfig, Vouch, q_from_f64, q_to_f64, ONE_Q, Epoch};
+
+use pqcrypto_falcon::falcon512;
+use pqcrypto_traits::sign::{PublicKey, SecretKey, DetachedSignature, SignedMessage};
+
+use sha3::{Sha3_256, Digest};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use sha3::{Sha3_256, Digest};
 
 // ============================================================================
-// HELPER TYPES & FUNCTIONS
+// HELPERS
 // ============================================================================
 
-type NodeId = [u8; 32];
-type Q = u64;
-type Weight = u128;
-type Slot = u64;
-
-const ONE_Q: Q = 1u64 << 32;
-
-fn random_node_id() -> NodeId {
+fn random_validator_id() -> ValidatorId {
     let mut id = [0u8; 32];
     OsRng.fill_bytes(&mut id);
     id
-}
-
-fn q_from_f64(x: f64) -> Q {
-    if x <= 0.0 { return 0; }
-    if x >= 1.0 { return ONE_Q; }
-    (x * (ONE_Q as f64)) as u64
-}
-
-fn q_to_f64(x: Q) -> f64 {
-    (x as f64) / (ONE_Q as f64)
 }
 
 fn sha3_hash(data: &[u8]) -> [u8; 32] {
@@ -51,860 +34,439 @@ fn sha3_hash(data: &[u8]) -> [u8; 32] {
 }
 
 // ============================================================================
-// 1. FAKE BLOCK PRODUCTION ATTACKS
+// 1. SYBIL ATTACK TESTS - Prawdziwe testy na ConsensusPro
 // ============================================================================
 
-mod fake_block_attacks {
+mod sybil_attacks {
     use super::*;
 
-    /// Test: Blok bez podpisu leadera jest odrzucany
+    /// Test: Sybil nodes bez stake'u nie mają wpływu na consensus
     #[test]
-    fn test_reject_unsigned_block() {
-        struct Block {
-            slot: Slot,
-            parent_hash: [u8; 32],
-            state_root: [u8; 32],
-            proposer_id: NodeId,
-            signature: Option<Vec<u8>>,  // Falcon signature
+    fn test_sybil_without_stake_has_no_weight() {
+        let mut consensus = ConsensusPro::new_default();
+        
+        let honest = random_validator_id();
+        consensus.register_validator(honest, 1_000_000);
+        
+        let sybils: Vec<ValidatorId> = (0..100).map(|_| {
+            let id = random_validator_id();
+            consensus.register_validator(id, 0);
+            id
+        }).collect();
+        
+        consensus.recompute_all_stake_q();
+        
+        for sybil in &sybils {
+            let weight = consensus.compute_validator_weight(sybil).unwrap_or(0);
+            assert_eq!(weight, 0, "Sybil bez stake'u nie powinien mieć wagi");
         }
         
-        let block = Block {
-            slot: 100,
-            parent_hash: sha3_hash(b"parent"),
-            state_root: sha3_hash(b"state"),
-            proposer_id: random_node_id(),
-            signature: None,  // ❌ Brak podpisu!
-        };
+        let honest_weight = consensus.compute_validator_weight(&honest).unwrap_or(0);
+        assert!(honest_weight > 0, "Uczciwy walidator powinien mieć wagę");
         
-        // Walidacja
-        let is_valid = block.signature.is_some() && !block.signature.as_ref().unwrap().is_empty();
-        assert!(!is_valid, "Niepodpisany blok MUSI być odrzucony");
-        
-        println!("✅ Unsigned block rejected");
+        println!("✅ Sybil attack blocked: 100 sybils have 0 weight, honest has {}", honest_weight);
     }
 
-    /// Test: Blok z podpisem nie-leadera jest odrzucany
+    /// Test: Sybil nodes z małym stake'iem mają proporcjonalnie małą wagę
     #[test]
-    fn test_reject_wrong_proposer_signature() {
-        let expected_leader = random_node_id();
-        let attacker = random_node_id();
+    fn test_sybil_stake_dilution() {
+        let mut consensus = ConsensusPro::new_default();
         
-        // Atakujący podpisuje blok mimo że nie jest leaderem
-        struct BlockHeader {
-            slot: Slot,
-            proposer_id: NodeId,
-        }
+        let honest_stake = 100_000u128;
+        let honest_nodes: Vec<ValidatorId> = (0..10).map(|_| {
+            let id = random_validator_id();
+            consensus.register_validator(id, honest_stake);
+            id
+        }).collect();
         
-        let block = BlockHeader {
-            slot: 100,
-            proposer_id: attacker,  // Atakujący wstawił siebie
-        };
+        let sybil_stake = 1_000u128;
+        let sybil_nodes: Vec<ValidatorId> = (0..100).map(|_| {
+            let id = random_validator_id();
+            consensus.register_validator(id, sybil_stake);
+            id
+        }).collect();
         
-        let is_correct_proposer = block.proposer_id == expected_leader;
-        assert!(!is_correct_proposer, "Blok od nie-leadera MUSI być odrzucony");
+        consensus.recompute_all_stake_q();
         
-        println!("✅ Wrong proposer rejected");
+        let total_sybil_weight: u128 = sybil_nodes.iter()
+            .filter_map(|id| consensus.compute_validator_weight(id))
+            .sum();
+        
+        let one_honest_weight = consensus.compute_validator_weight(&honest_nodes[0]).unwrap_or(0);
+        
+        let ratio = total_sybil_weight as f64 / one_honest_weight as f64;
+        assert!(ratio > 0.9 && ratio < 1.1, 
+            "Sybil stake dilution: ratio = {:.2}, expected ~1.0", ratio);
+        
+        println!("✅ Sybil stake dilution works: 100 sybils = {:.2}x one honest", ratio);
     }
 
-    /// Test: Blok z przyszłości jest odrzucany
+    /// Test: Nowy walidator bez historii ma niski trust
     #[test]
-    fn test_reject_future_slot_block() {
-        let current_slot: Slot = 1000;
-        let block_slot: Slot = 1100;  // 100 slotów w przyszłości
+    fn test_new_validator_low_trust() {
+        let config = RTTConfig::default();
+        let trust_graph = TrustGraph::new(config);
         
-        const MAX_FUTURE_SLOTS: Slot = 10;
+        let new_validator = random_validator_id();
+        let trust = trust_graph.get_trust(&new_validator);
         
-        let is_too_far_future = block_slot > current_slot + MAX_FUTURE_SLOTS;
-        assert!(is_too_far_future, "Blok z dalekiej przyszłości MUSI być odrzucony");
+        assert!(trust < ONE_Q / 2, 
+            "Nowy walidator bez historii powinien mieć niski trust, ma: {}", 
+            q_to_f64(trust));
         
-        println!("✅ Future slot block rejected (slot {} vs current {})", block_slot, current_slot);
-    }
-
-    /// Test: Blok z nieprawidłowym parent hash jest odrzucany
-    #[test]
-    fn test_reject_invalid_parent_hash() {
-        let real_parent_hash = sha3_hash(b"real_parent_block_data");
-        let claimed_parent_hash = sha3_hash(b"fake_parent");
-        
-        let parent_valid = real_parent_hash == claimed_parent_hash;
-        assert!(!parent_valid, "Blok z fałszywym parent hash MUSI być odrzucony");
-        
-        println!("✅ Invalid parent hash rejected");
-    }
-
-    /// Test: Podwójne podpisanie tego samego slotu (equivocation)
-    #[test]
-    fn test_detect_equivocation() {
-        let proposer = random_node_id();
-        let slot: Slot = 100;
-        
-        // Ten sam proposer, ten sam slot, dwa różne bloki
-        let block1_hash = sha3_hash(b"block_version_1");
-        let block2_hash = sha3_hash(b"block_version_2");
-        
-        struct EquivocationProof {
-            proposer: NodeId,
-            slot: Slot,
-            block1_hash: [u8; 32],
-            block2_hash: [u8; 32],
-            // W rzeczywistości: oba podpisy od tego samego klucza
-        }
-        
-        let proof = EquivocationProof {
-            proposer,
-            slot,
-            block1_hash,
-            block2_hash,
-        };
-        
-        // Equivocation = ten sam (proposer, slot), różne bloki
-        let is_equivocation = proof.block1_hash != proof.block2_hash;
-        assert!(is_equivocation, "Equivocation wykryta - węzeł powinien być slashowany!");
-        
-        println!("✅ Equivocation detected - proposer should be slashed");
+        println!("✅ New validator has low trust: {:.4}", q_to_f64(trust));
     }
 }
 
 // ============================================================================
-// 2. STAKE MANIPULATION ATTACKS
+// 2. LEADER SELECTION ATTACKS
 // ============================================================================
 
-mod stake_attacks {
+mod leader_selection_attacks {
     use super::*;
 
-    /// Test: Stake grinding - próba manipulacji randomnością przez stake
     #[test]
-    fn test_stake_grinding_resistance() {
-        // Atakujący próbuje różnych wartości stake aby wygrać leader selection
-        let beacon = sha3_hash(b"random_beacon");
-        let attacker_id = random_node_id();
+    fn test_leader_selection_deterministic() {
+        let mut consensus = ConsensusPro::new_default();
         
-        let mut wins = 0;
-        let attempts = 1000;
+        for i in 0..10 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            consensus.register_validator(id, 100_000);
+        }
+        consensus.recompute_all_stake_q();
         
-        for stake_value in 1u64..=attempts {
-            // Symulacja: czy zmiana stake zmienia wynik leader selection?
-            let selection_hash = {
-                let mut h = Sha3_256::new();
-                h.update(&beacon);
-                h.update(&attacker_id);
-                h.update(&stake_value.to_le_bytes());
-                h.finalize()
-            };
-            
-            // Arbitralny próg "wygrania"
-            if selection_hash[0] == 0 {
-                wins += 1;
+        let beacon = sha3_hash(b"slot_12345_randomness");
+        
+        let leader1 = consensus.select_leader(beacon);
+        let leader2 = consensus.select_leader(beacon);
+        
+        assert_eq!(leader1, leader2, "Leader selection must be deterministic");
+        println!("✅ Leader selection is deterministic");
+    }
+
+    #[test]
+    fn test_leader_selection_varies_with_beacon() {
+        let mut consensus = ConsensusPro::new_default();
+        
+        for i in 0..20u8 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            consensus.register_validator(id, 100_000);
+        }
+        consensus.recompute_all_stake_q();
+        
+        let mut leaders = std::collections::HashSet::new();
+        
+        for i in 0..100u32 {
+            let beacon = sha3_hash(&i.to_le_bytes());
+            if let Some(leader) = consensus.select_leader(beacon) {
+                leaders.insert(leader);
             }
         }
         
-        // Przy odpornym systemie, wins powinno być ~4 (1/256 * 1000)
-        // Przy stake grinding, atakujący mógłby wymusić więcej
-        let expected_wins = attempts / 256;
-        let tolerance = expected_wins * 3;  // 3x tolerance
+        assert!(leaders.len() > 5, 
+            "Leader selection should vary, got only {} unique leaders", leaders.len());
         
-        assert!(wins <= tolerance as i32, 
-            "Stake grinding może być możliwy! Wins: {} (expected ~{})", wins, expected_wins);
-        
-        println!("✅ Stake grinding resistance OK (wins: {}/{})", wins, attempts);
+        println!("✅ Leader selection varies: {} unique leaders from 100 beacons", leaders.len());
     }
 
-    /// Test: Nothing-at-stake - głosowanie na wiele forków
     #[test]
-    fn test_nothing_at_stake_detection() {
-        let validator = random_node_id();
+    fn test_zero_stake_never_leader() {
+        let mut consensus = ConsensusPro::new_default();
         
-        // Validator głosuje na oba forki
-        let fork_a = sha3_hash(b"fork_a");
-        let fork_b = sha3_hash(b"fork_b");
+        let zero_stake = random_validator_id();
+        consensus.register_validator(zero_stake, 0);
         
-        struct Vote {
-            validator: NodeId,
-            block_hash: [u8; 32],
-            slot: Slot,
+        let with_stake = random_validator_id();
+        consensus.register_validator(with_stake, 1_000_000);
+        
+        consensus.recompute_all_stake_q();
+        
+        for i in 0..1000u32 {
+            let beacon = sha3_hash(&i.to_le_bytes());
+            if let Some(leader) = consensus.select_leader(beacon) {
+                assert_ne!(leader, zero_stake, 
+                    "Zero stake validator should never be selected as leader");
+            }
         }
         
-        let vote_a = Vote { validator, block_hash: fork_a, slot: 100 };
-        let vote_b = Vote { validator, block_hash: fork_b, slot: 100 };
-        
-        // Detector: ten sam validator, ten sam slot, różne bloki
-        let is_double_vote = vote_a.validator == vote_b.validator 
-            && vote_a.slot == vote_b.slot 
-            && vote_a.block_hash != vote_b.block_hash;
-        
-        assert!(is_double_vote, "Nothing-at-stake attack wykryty!");
-        
-        println!("✅ Nothing-at-stake (double voting) detected");
-    }
-
-    /// Test: Unbonding period enforcement
-    #[test]
-    fn test_unbonding_period_enforced() {
-        const UNBONDING_PERIOD_SLOTS: Slot = 14400;  // ~1 dzień przy 6s/slot
-        
-        let unbonding_started_at: Slot = 1000;
-        let current_slot: Slot = 5000;
-        
-        let can_withdraw = current_slot >= unbonding_started_at + UNBONDING_PERIOD_SLOTS;
-        assert!(!can_withdraw, "Unbonding period nie minął - wypłata zablokowana");
-        
-        let after_unbonding: Slot = unbonding_started_at + UNBONDING_PERIOD_SLOTS + 1;
-        let can_withdraw_later = after_unbonding >= unbonding_started_at + UNBONDING_PERIOD_SLOTS;
-        assert!(can_withdraw_later, "Po unbonding period wypłata dozwolona");
-        
-        println!("✅ Unbonding period enforced ({} slots)", UNBONDING_PERIOD_SLOTS);
-    }
-
-    /// Test: Minimum stake requirement
-    #[test]
-    fn test_minimum_stake_enforced() {
-        const MIN_STAKE: u128 = 1_000_000;  // 1M tokens
-        
-        let attacker_stake: u128 = 100;  // Za mało
-        let honest_stake: u128 = 2_000_000;
-        
-        assert!(attacker_stake < MIN_STAKE, "Za niski stake odrzucony");
-        assert!(honest_stake >= MIN_STAKE, "Prawidłowy stake zaakceptowany");
-        
-        println!("✅ Minimum stake enforced ({} tokens)", MIN_STAKE);
-    }
-
-    /// Test: Stake cap per validator (decentralization)
-    #[test]
-    fn test_stake_cap_per_validator() {
-        const MAX_STAKE_PERCENT: u64 = 10;  // Max 10% total stake
-        
-        let total_stake: u128 = 100_000_000;
-        let max_allowed = total_stake * MAX_STAKE_PERCENT as u128 / 100;
-        
-        let whale_stake: u128 = 50_000_000;  // 50% - za dużo!
-        
-        let effective_stake = whale_stake.min(max_allowed);
-        
-        assert!(effective_stake < whale_stake, 
-            "Whale stake jest ograniczony do {}% total stake", MAX_STAKE_PERCENT);
-        
-        println!("✅ Stake cap enforced (max {}% = {} tokens)", MAX_STAKE_PERCENT, max_allowed);
+        println!("✅ Zero stake validator never selected as leader in 1000 tries");
     }
 }
 
 // ============================================================================
-// 3. TRUST MANIPULATION ATTACKS (SYBIL, VOUCHING)
+// 3. TRUST MANIPULATION ATTACKS
 // ============================================================================
 
 mod trust_attacks {
     use super::*;
 
-    /// Test: Sybil attack - wiele fake identities
     #[test]
-    fn test_sybil_attack_resistance() {
-        // Atakujący tworzy 100 fake nodes
-        let attacker_main = random_node_id();
-        let sybil_nodes: Vec<NodeId> = (0..100).map(|_| random_node_id()).collect();
+    fn test_self_vouch_ignored() {
+        let config = RTTConfig::default();
+        let mut trust_graph = TrustGraph::new(config);
         
-        // Każdy sybil node ma niski stake
-        let stake_per_sybil: u128 = 1000;
-        let total_sybil_stake = stake_per_sybil * sybil_nodes.len() as u128;
+        let attacker = random_validator_id();
         
-        // Ale trust zaczyna od 0 dla nowych węzłów!
-        let initial_trust_per_sybil: Q = 0;  // Nowi walidatorzy nie mają trustu
+        let trust_before = trust_graph.get_trust(&attacker);
         
-        // W TRUE TRUST: weight = 4*trust + 2*quality + 1*stake
-        // Bez trustu i quality, sam stake ma niską wagę
-        let sybil_weight = 1 * stake_per_sybil;  // tylko stake
-        
-        // Uczciwy węzeł z historią
-        let honest_stake: u128 = 10_000;
-        let honest_trust = q_from_f64(0.8);
-        let honest_quality = q_from_f64(0.9);
-        let honest_weight = 4 * honest_trust as u128 + 2 * honest_quality as u128 + 1 * honest_stake;
-        
-        assert!(honest_weight > sybil_weight * 100, 
-            "Uczciwy węzeł z trust powinien mieć znacznie większą wagę niż Sybil army");
-        
-        println!("✅ Sybil attack resistance: trust-weighted system");
-    }
-
-    /// Test: Fake vouching detection
-    #[test]
-    fn test_fake_vouching_detection() {
-        let attacker = random_node_id();
-        let fake_vouchee = random_node_id();
-        
-        // Atakujący próbuje vouchować za fake node
-        // Ale vouching wymaga minimum trust od vouchera!
-        let attacker_trust = q_from_f64(0.3);  // Niski trust
-        let min_trust_to_vouch = q_from_f64(0.5);
-        
-        let can_vouch = attacker_trust >= min_trust_to_vouch;
-        assert!(!can_vouch, "Węzeł z niskim trust nie może vouchować");
-        
-        println!("✅ Fake vouching blocked (requires trust >= 0.5)");
-    }
-
-    /// Test: Vouch circle detection (A vouches B, B vouches A)
-    #[test]
-    fn test_vouch_circle_detection() {
-        let node_a = random_node_id();
-        let node_b = random_node_id();
-        
-        struct Vouch {
-            voucher: NodeId,
-            vouchee: NodeId,
-        }
-        
-        let vouch_ab = Vouch { voucher: node_a, vouchee: node_b };
-        let vouch_ba = Vouch { voucher: node_b, vouchee: node_a };
-        
-        // Wykryj cykl
-        let is_circle = vouch_ab.voucher == vouch_ba.vouchee 
-            && vouch_ab.vouchee == vouch_ba.voucher;
-        
-        assert!(is_circle, "Vouch circle wykryty!");
-        
-        // W RTT PRO: vouching jest normalizowany i ma cap
-        // Wzajemne vouchowanie nie daje wykładniczego boostu
-        println!("✅ Vouch circle detected - normalized in RTT PRO");
-    }
-
-    /// Test: Trust manipulation przez fake quality
-    #[test]
-    fn test_fake_quality_prevention() {
-        // Quality pochodzi z Golden Trio (verifiable on-chain)
-        // Atakujący nie może "sfałszować" quality
-        
-        struct QualityReport {
-            validator: NodeId,
-            slot_participation: bool,
-            valid_attestations: u32,
-            total_attestations: u32,
-            block_proposed_on_time: bool,
-        }
-        
-        let fake_report = QualityReport {
-            validator: random_node_id(),
-            slot_participation: true,
-            valid_attestations: 100,
-            total_attestations: 100,
-            block_proposed_on_time: true,
+        let self_vouch = Vouch {
+            voucher: attacker,
+            vouchee: attacker,
+            strength: ONE_Q,
+            created_at: 1 as Epoch,
         };
         
-        // W rzeczywistości: te dane są weryfikowane przez innych walidatorów
-        // Fałszywy raport będzie odrzucony przez consensus
+        let accepted = trust_graph.add_vouch(self_vouch);
+        let trust_after = trust_graph.get_trust(&attacker);
         
-        println!("✅ Fake quality prevented by on-chain verification");
+        if accepted {
+            assert_eq!(trust_before, trust_after, 
+                "Self-vouch should not increase trust");
+        }
+        
+        println!("✅ Self-vouch blocked: accepted={}, trust before={:.4}, after={:.4}", 
+            accepted, q_to_f64(trust_before), q_to_f64(trust_after));
     }
 
-    /// Test: Gradual trust decay for inactive validators
     #[test]
-    fn test_trust_decay_inactive() {
-        let alpha = q_from_f64(0.99);  // History memory
-        let one_minus_alpha = ONE_Q - alpha;
+    fn test_vouch_from_untrusted_has_low_impact() {
+        let config = RTTConfig::default();
+        let mut trust_graph = TrustGraph::new(config);
         
-        let initial_trust = q_from_f64(0.9);
+        let untrusted_voucher = random_validator_id();
+        let target = random_validator_id();
         
-        // Symulacja: walidator nieaktywny przez 100 epok
-        let mut trust = initial_trust;
-        let zero_quality = 0u64;
+        let trust_before = trust_graph.get_trust(&target);
         
-        for epoch in 1..=100 {
-            // H_new = α·H_old + (1-α)·Q_t (where Q_t = 0 for inactive)
-            let h_old_part = ((trust as u128 * alpha as u128) >> 32) as u64;
-            let q_part = ((zero_quality as u128 * one_minus_alpha as u128) >> 32) as u64;
-            trust = h_old_part + q_part;
-            
-            if epoch % 20 == 0 {
-                println!("  Epoch {}: trust = {:.4}", epoch, q_to_f64(trust));
+        let vouch = Vouch {
+            voucher: untrusted_voucher,
+            vouchee: target,
+            strength: ONE_Q,
+            created_at: 1 as Epoch,
+        };
+        
+        trust_graph.add_vouch(vouch);
+        trust_graph.update_trust(target);
+        
+        let trust_after = trust_graph.get_trust(&target);
+        
+        let increase = q_to_f64(trust_after) - q_to_f64(trust_before);
+        assert!(increase < 0.1, 
+            "Vouch from untrusted should have low impact, got increase: {:.4}", increase);
+        
+        println!("✅ Vouch from untrusted has low impact: +{:.4}", increase);
+    }
+
+    #[test]
+    fn test_quality_affects_trust() {
+        let config = RTTConfig::default();
+        let mut trust_graph = TrustGraph::new(config);
+        
+        let good_validator = random_validator_id();
+        let bad_validator = random_validator_id();
+        
+        for _ in 0..100 {
+            trust_graph.record_quality(good_validator, q_from_f64(0.95));
+        }
+        
+        for _ in 0..100 {
+            trust_graph.record_quality(bad_validator, q_from_f64(0.1));
+        }
+        
+        trust_graph.update_trust(good_validator);
+        trust_graph.update_trust(bad_validator);
+        
+        let good_trust = trust_graph.get_trust(&good_validator);
+        let bad_trust = trust_graph.get_trust(&bad_validator);
+        
+        assert!(good_trust > bad_trust, 
+            "Good validator should have higher trust than bad one");
+        
+        println!("✅ Quality affects trust: good={:.4}, bad={:.4}", 
+            q_to_f64(good_trust), q_to_f64(bad_trust));
+    }
+}
+
+// ============================================================================
+// 4. SIGNATURE ATTACKS - Prawdziwe testy na Falcon
+// ============================================================================
+
+mod signature_attacks {
+    use super::*;
+
+    #[test]
+    fn test_wrong_key_signature_rejected() {
+        let (pk1, sk1) = falcon512::keypair();
+        let (pk2, _sk2) = falcon512::keypair();
+        
+        let message = b"block_header_data";
+        let signed_msg = falcon512::sign(message, &sk1);
+        
+        let opened1 = falcon512::open(&signed_msg, &pk1);
+        assert!(opened1.is_ok(), "Correct key should verify");
+        assert_eq!(opened1.unwrap(), message);
+        
+        let opened2 = falcon512::open(&signed_msg, &pk2);
+        assert!(opened2.is_err(), "Wrong key must reject signature");
+        
+        println!("✅ Wrong key signature rejected");
+    }
+
+    #[test]
+    fn test_corrupted_signature_rejected() {
+        let (pk, sk) = falcon512::keypair();
+        
+        let message = b"important transaction data";
+        let signed_msg = falcon512::sign(message, &sk);
+        
+        let mut corrupted_bytes = signed_msg.as_bytes().to_vec();
+        if corrupted_bytes.len() > 100 {
+            corrupted_bytes[50] ^= 0xFF;
+            corrupted_bytes[100] ^= 0xFF;
+        }
+        
+        // Próba parsowania i weryfikacji
+        let parsed = falcon512::SignedMessage::from_bytes(&corrupted_bytes);
+        match parsed {
+            Ok(sm) => {
+                let verify = falcon512::open(&sm, &pk);
+                assert!(verify.is_err(), "Corrupted signature should not verify");
+                println!("✅ Corrupted signature rejected (verify failed)");
+            }
+            Err(_) => {
+                println!("✅ Corrupted signature rejected (parse failed)");
+            }
+        }
+    }
+
+    #[test]
+    fn test_random_signature_rejected() {
+        let (pk, _sk) = falcon512::keypair();
+        
+        let mut fake_sig = vec![0u8; 1500];
+        OsRng.fill_bytes(&mut fake_sig);
+        
+        let parsed = falcon512::SignedMessage::from_bytes(&fake_sig);
+        
+        match parsed {
+            Ok(sm) => {
+                let verify = falcon512::open(&sm, &pk);
+                assert!(verify.is_err(), "Random bytes must not verify");
+            }
+            Err(_) => {
+                // Parse failed - that's also acceptable
             }
         }
         
-        assert!(trust < q_from_f64(0.5), 
-            "Trust nieaktywnego walidatora powinien spadać");
+        println!("✅ Random signature rejected");
+    }
+
+    #[test]
+    fn test_detached_signature_verification() {
+        let (pk, sk) = falcon512::keypair();
         
-        println!("✅ Trust decay for inactive validators OK");
+        let message = b"block header for signing";
+        let signature = falcon512::detached_sign(message, &sk);
+        
+        let valid = falcon512::verify_detached_signature(&signature, message, &pk);
+        assert!(valid.is_ok(), "Valid signature should verify");
+        
+        let wrong_msg = b"different message";
+        let invalid = falcon512::verify_detached_signature(&signature, wrong_msg, &pk);
+        assert!(invalid.is_err(), "Wrong message must fail verification");
+        
+        println!("✅ Detached signature API works correctly");
     }
 }
 
 // ============================================================================
-// 4. LEADER SELECTION ATTACKS
+// 5. CONSENSUS WEIGHT CALCULATION
 // ============================================================================
 
-mod leader_attacks {
+mod weight_attacks {
     use super::*;
 
-    /// Test: Leader prediction attack
     #[test]
-    fn test_leader_prediction_resistance() {
-        // Beacon pochodzi z RandomX - trudny do przewidzenia
-        let mut beacons: Vec<[u8; 32]> = Vec::new();
+    fn test_weight_proportional_to_stake() {
+        let mut consensus = ConsensusPro::new_default();
         
-        for i in 0u64..100u64 {
-            // Symulacja: beacon = hash(prev_beacon || PoW_solution)
-            let prev = if i == 0 { [0u8; 32] } else { beacons[i as usize - 1] };
-            let pow_solution = sha3_hash(&i.to_le_bytes());  // Symulacja
-            
-            let mut h = Sha3_256::new();
-            h.update(&prev);
-            h.update(&pow_solution);
-            let beacon: [u8; 32] = h.finalize().into();
-            
-            beacons.push(beacon);
+        let small = random_validator_id();
+        let medium = random_validator_id();
+        let large = random_validator_id();
+        
+        consensus.register_validator(small, 10_000);
+        consensus.register_validator(medium, 100_000);
+        consensus.register_validator(large, 1_000_000);
+        
+        consensus.recompute_all_stake_q();
+        
+        let w_small = consensus.compute_validator_weight(&small).unwrap_or(0);
+        let w_medium = consensus.compute_validator_weight(&medium).unwrap_or(0);
+        let w_large = consensus.compute_validator_weight(&large).unwrap_or(0);
+        
+        assert!(w_small < w_medium, "Small stake should have less weight than medium");
+        assert!(w_medium < w_large, "Medium stake should have less weight than large");
+        
+        let ratio_lm = w_large as f64 / w_medium as f64;
+        let ratio_ms = w_medium as f64 / w_small as f64;
+        
+        assert!(ratio_lm > 5.0 && ratio_lm < 15.0, 
+            "Large/medium ratio should be ~10, got {:.2}", ratio_lm);
+        assert!(ratio_ms > 5.0 && ratio_ms < 15.0, 
+            "Medium/small ratio should be ~10, got {:.2}", ratio_ms);
+        
+        println!("✅ Weight proportional to stake: L/M={:.1}, M/S={:.1}", ratio_lm, ratio_ms);
+    }
+
+    #[test]
+    fn test_removed_validator_has_no_weight() {
+        let mut consensus = ConsensusPro::new_default();
+        
+        let validator = random_validator_id();
+        consensus.register_validator(validator, 1_000_000);
+        consensus.recompute_all_stake_q();
+        
+        let weight_before = consensus.compute_validator_weight(&validator);
+        assert!(weight_before.is_some() && weight_before.unwrap() > 0);
+        
+        consensus.remove_validator(&validator);
+        
+        let weight_after = consensus.compute_validator_weight(&validator);
+        assert!(weight_after.is_none() || weight_after.unwrap() == 0,
+            "Removed validator should have no weight");
+        
+        println!("✅ Removed validator has no weight");
+    }
+
+    #[test]
+    fn test_stake_update_changes_weight() {
+        let mut consensus = ConsensusPro::new_default();
+        
+        // Need multiple validators so stake_q is not always 100%
+        let validator = random_validator_id();
+        consensus.register_validator(validator, 100_000);
+        
+        // Add 4 more validators with fixed stake
+        for i in 0..4u8 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            consensus.register_validator(id, 100_000);
         }
+        consensus.recompute_all_stake_q();
         
-        // Każdy beacon powinien być "losowy" - nieprzewidywalny
-        let unique_beacons: HashSet<[u8; 32]> = beacons.iter().cloned().collect();
-        assert_eq!(unique_beacons.len(), 100, "Wszystkie beacony muszą być unikalne");
+        let weight_100k = consensus.compute_validator_weight(&validator).unwrap_or(0);
         
-        println!("✅ Leader prediction resistant (RandomX-based beacon)");
-    }
-
-    /// Test: Beacon grinding attack
-    #[test]
-    fn test_beacon_grinding_resistance() {
-        // Atakujący próbuje różnych PoW solutions aby uzyskać korzystny beacon
-        let prev_beacon = sha3_hash(b"previous_beacon");
-        let attacker_id = random_node_id();
+        // Increase stake 10x
+        consensus.update_stake_raw(&validator, 1_000_000);
+        consensus.recompute_all_stake_q();
         
-        let mut favorable_count = 0;
-        let grinding_attempts = 10_000;
+        let weight_1m = consensus.compute_validator_weight(&validator).unwrap_or(0);
         
-        for nonce in 0u64..grinding_attempts {
-            let mut h = Sha3_256::new();
-            h.update(&prev_beacon);
-            h.update(&nonce.to_le_bytes());
-            let candidate_beacon: [u8; 32] = h.finalize().into();
-            
-            // Sprawdź czy ten beacon faworyzuje atakującego
-            // (w uproszczeniu: czy hash zaczyna się od atakującego ID)
-            if candidate_beacon[0] == attacker_id[0] {
-                favorable_count += 1;
-            }
-        }
+        assert!(weight_1m > weight_100k, 
+            "Weight should increase with stake: {} -> {}", weight_100k, weight_1m);
         
-        // Przy odpornym systemie: ~1/256 beaconów jest "korzystnych"
-        let expected = grinding_attempts / 256;
-        let tolerance = expected * 2;
-        
-        assert!(favorable_count <= tolerance, 
-            "Beacon grinding może być możliwy! Favorable: {}", favorable_count);
-        
-        println!("✅ Beacon grinding resistance OK ({}/{})", favorable_count, grinding_attempts);
-    }
-
-    /// Test: Leader must have minimum weight
-    #[test]
-    fn test_leader_minimum_weight() {
-        const MIN_LEADER_WEIGHT: Weight = 1_000_000;
-        
-        struct Validator {
-            id: NodeId,
-            weight: Weight,
-        }
-        
-        let validators = vec![
-            Validator { id: random_node_id(), weight: 500_000 },    // Too low
-            Validator { id: random_node_id(), weight: 2_000_000 },  // OK
-            Validator { id: random_node_id(), weight: 100 },        // Too low
-        ];
-        
-        let eligible: Vec<_> = validators.iter()
-            .filter(|v| v.weight >= MIN_LEADER_WEIGHT)
-            .collect();
-        
-        assert_eq!(eligible.len(), 1, "Tylko 1 walidator spełnia minimum weight");
-        
-        println!("✅ Leader minimum weight enforced");
-    }
-}
-
-// ============================================================================
-// 5. FORK ATTACKS
-// ============================================================================
-
-mod fork_attacks {
-    use super::*;
-
-    /// Test: Long-range attack prevention
-    #[test]
-    fn test_long_range_attack_prevention() {
-        // Atakujący próbuje przepisać historię od dawno
-        const FINALITY_DEPTH: Slot = 128;  // Bloki starsze niż 128 slotów są finalne
-        
-        let current_slot: Slot = 1000;
-        let attack_start_slot: Slot = 500;  // 500 slotów wstecz
-        
-        let is_finalized = current_slot - attack_start_slot > FINALITY_DEPTH;
-        assert!(is_finalized, "Bloki są sfinalizowane - long-range attack niemożliwy");
-        
-        println!("✅ Long-range attack prevented (finality depth: {} slots)", FINALITY_DEPTH);
-    }
-
-    /// Test: Short-range attack (reorganization) limits
-    #[test]
-    fn test_reorg_depth_limit() {
-        const MAX_REORG_DEPTH: u64 = 6;
-        
-        let proposed_reorg_depth = 10;
-        
-        let reorg_allowed = proposed_reorg_depth <= MAX_REORG_DEPTH;
-        assert!(!reorg_allowed, "Głęboka reorganizacja zablokowana");
-        
-        println!("✅ Reorg depth limited to {} blocks", MAX_REORG_DEPTH);
-    }
-
-    /// Test: Fork choice follows heaviest chain
-    #[test]
-    fn test_fork_choice_heaviest_chain() {
-        struct ChainHead {
-            hash: [u8; 32],
-            slot: Slot,
-            total_weight: Weight,
-        }
-        
-        let fork_a = ChainHead {
-            hash: sha3_hash(b"fork_a_head"),
-            slot: 100,
-            total_weight: 1_000_000,
-        };
-        
-        let fork_b = ChainHead {
-            hash: sha3_hash(b"fork_b_head"),
-            slot: 100,
-            total_weight: 1_500_000,  // Cięższy!
-        };
-        
-        let canonical = if fork_a.total_weight > fork_b.total_weight {
-            &fork_a
-        } else {
-            &fork_b
-        };
-        
-        assert_eq!(canonical.hash, fork_b.hash, "Fork choice wybiera cięższy łańcuch");
-        
-        println!("✅ Fork choice follows heaviest chain");
-    }
-
-    /// Test: Weak subjectivity checkpoint enforcement
-    #[test]
-    fn test_weak_subjectivity_checkpoint() {
-        // Nowy węzeł musi mieć checkpoint nie starszy niż X epok
-        const WEAK_SUBJECTIVITY_PERIOD_SLOTS: Slot = 50_000;
-        
-        let checkpoint_slot: Slot = 10_000;
-        let current_slot: Slot = 100_000;
-        
-        let checkpoint_age = current_slot - checkpoint_slot;
-        let checkpoint_valid = checkpoint_age <= WEAK_SUBJECTIVITY_PERIOD_SLOTS;
-        
-        assert!(!checkpoint_valid, "Stary checkpoint odrzucony");
-        
-        println!("✅ Weak subjectivity checkpoint enforced");
-    }
-}
-
-// ============================================================================
-// 6. CENSORSHIP ATTACKS
-// ============================================================================
-
-mod censorship_attacks {
-    use super::*;
-
-    /// Test: Transaction inclusion forced by competing validators
-    #[test]
-    fn test_censorship_resistance() {
-        // Jeśli 1 validator cenzuruje TX, inni mogą go włączyć
-        let censoring_validator = random_node_id();
-        let honest_validators: Vec<NodeId> = (0..10).map(|_| random_node_id()).collect();
-        
-        let censored_tx = sha3_hash(b"censored_transaction");
-        
-        // TX w mempool jest widoczny dla wszystkich
-        let mut validators_with_tx: HashSet<NodeId> = HashSet::new();
-        validators_with_tx.insert(censoring_validator);  // Ma TX ale cenzuruje
-        for v in &honest_validators {
-            validators_with_tx.insert(*v);  // Mają TX i mogą włączyć
-        }
-        
-        // Prawdopodobieństwo włączenia = % uczciwych walidatorów
-        let honest_ratio = honest_validators.len() as f64 / (honest_validators.len() + 1) as f64;
-        
-        assert!(honest_ratio > 0.9, "TX zostanie włączony przez uczciwych walidatorów");
-        
-        println!("✅ Censorship resistance: {} honest validators can include TX", 
-            honest_validators.len());
-    }
-
-    /// Test: Proposer cannot exclude attestations
-    #[test]
-    fn test_attestation_inclusion() {
-        // Proposer nie może zignorować attestations - są one weryfikowane
-        
-        struct Block {
-            slot: Slot,
-            attestations: Vec<[u8; 32]>,
-            proposer: NodeId,
-        }
-        
-        let all_attestations: Vec<[u8; 32]> = (0u64..100).map(|i| {
-            sha3_hash(&i.to_le_bytes())
-        }).collect();
-        
-        // Proposer próbuje włączyć tylko 10
-        let block = Block {
-            slot: 100,
-            attestations: all_attestations[..10].to_vec(),
-            proposer: random_node_id(),
-        };
-        
-        // Inni walidatorzy widzą że brakuje attestations
-        let expected_min_attestations = 50;  // Minimum 50% powinno być włączone
-        let attestation_ratio = block.attestations.len() as f64 / all_attestations.len() as f64;
-        
-        // Słaby proposer może być ukarany za niską inkluzję
-        assert!(attestation_ratio < 0.5, 
-            "Niska inkluzja attestations - proposer może być ukarany");
-        
-        println!("✅ Attestation exclusion detectable");
-    }
-}
-
-// ============================================================================
-// 7. MEV ATTACKS (Front-running, Sandwich)
-// ============================================================================
-
-mod mev_attacks {
-    use super::*;
-
-    /// Test: Front-running mitigation through encryption
-    #[test]
-    fn test_frontrunning_mitigation() {
-        // TX są zaszyfrowane do proposera - nikt nie zna zawartości przed inkluzją
-        
-        struct EncryptedTx {
-            ciphertext: Vec<u8>,
-            proposer_slot: Slot,  // TX odkodowany dopiero w tym slocie
-        }
-        
-        let user_tx = EncryptedTx {
-            ciphertext: vec![0u8; 256],  // Zaszyfrowane
-            proposer_slot: 100,
-        };
-        
-        // Atakujący widzi tylko ciphertext - nie może front-runnować
-        let can_frontrun = false;  // Nie zna zawartości TX
-        
-        assert!(!can_frontrun, "Front-running niemożliwy z zaszyfrowanymi TX");
-        
-        println!("✅ Front-running mitigated by TX encryption");
-    }
-
-    /// Test: Sandwich attack mitigation
-    #[test]
-    fn test_sandwich_attack_mitigation() {
-        // Commit-reveal scheme: TX commitment najpierw, reveal później
-        
-        struct TxCommitment {
-            tx_hash: [u8; 32],
-            committed_at_slot: Slot,
-        }
-        
-        struct TxReveal {
-            tx_data: Vec<u8>,
-            commitment_slot: Slot,
-        }
-        
-        let commitment = TxCommitment {
-            tx_hash: sha3_hash(b"user_swap_tx"),
-            committed_at_slot: 100,
-        };
-        
-        // Reveal dopiero po commit - atakujący nie może wstawić TX między
-        let reveal = TxReveal {
-            tx_data: b"user_swap_tx".to_vec(),
-            commitment_slot: 100,
-        };
-        
-        // Verify: reveal matches commitment
-        let reveal_hash = sha3_hash(&reveal.tx_data);
-        let valid_reveal = reveal_hash == commitment.tx_hash;
-        
-        assert!(valid_reveal, "Reveal pasuje do commitment");
-        
-        println!("✅ Sandwich attack mitigated by commit-reveal");
-    }
-
-    /// Test: Private mempool (stealth TX)
-    #[test]
-    fn test_private_mempool() {
-        // Stealth TX nie są widoczne w publicznym mempool
-        
-        let public_mempool_size = 100;
-        let private_stealth_txs = 50;  // Niewidoczne
-        
-        // Atakujący widzi tylko public mempool
-        let attacker_visible = public_mempool_size;
-        let total_pending = public_mempool_size + private_stealth_txs;
-        
-        assert!(attacker_visible < total_pending, 
-            "Atakujący nie widzi prywatnych TX");
-        
-        println!("✅ Private mempool hides {} stealth TXs", private_stealth_txs);
-    }
-}
-
-// ============================================================================
-// 8. SLASHING EVASION ATTACKS
-// ============================================================================
-
-mod slashing_attacks {
-    use super::*;
-
-    /// Test: Equivocation proof is permanent
-    #[test]
-    fn test_equivocation_proof_permanent() {
-        struct SlashingRecord {
-            validator: NodeId,
-            offense: &'static str,
-            proof_hash: [u8; 32],
-            slot: Slot,
-            is_slashed: bool,
-        }
-        
-        let record = SlashingRecord {
-            validator: random_node_id(),
-            offense: "EQUIVOCATION",
-            proof_hash: sha3_hash(b"equivocation_proof"),
-            slot: 100,
-            is_slashed: true,
-        };
-        
-        // Raz slashowany - na zawsze w rekordach
-        assert!(record.is_slashed, "Slashing jest permanentny");
-        
-        println!("✅ Slashing records are permanent");
-    }
-
-    /// Test: Cannot re-register after slashing
-    #[test]
-    fn test_no_reregister_after_slash() {
-        let slashed_validators: HashSet<NodeId> = {
-            let mut set = HashSet::new();
-            set.insert(random_node_id());
-            set
-        };
-        
-        let attacker = *slashed_validators.iter().next().unwrap();
-        
-        // Próba re-rejestracji
-        let can_register = !slashed_validators.contains(&attacker);
-        
-        assert!(!can_register, "Slashowany walidator nie może się ponownie zarejestrować");
-        
-        println!("✅ Re-registration blocked for slashed validators");
-    }
-
-    /// Test: Slashing affects delegators proportionally
-    #[test]
-    fn test_delegator_slashing() {
-        const SLASHING_PENALTY_PERCENT: u64 = 10;  // 10% stake
-        
-        let validator_stake: u128 = 1_000_000;
-        let delegator1_stake: u128 = 100_000;
-        let delegator2_stake: u128 = 200_000;
-        
-        let total_stake = validator_stake + delegator1_stake + delegator2_stake;
-        let slash_amount = total_stake * SLASHING_PENALTY_PERCENT as u128 / 100;
-        
-        // Proporcjonalne slashing
-        let validator_slash = slash_amount * validator_stake / total_stake;
-        let delegator1_slash = slash_amount * delegator1_stake / total_stake;
-        let delegator2_slash = slash_amount * delegator2_stake / total_stake;
-        
-        assert_eq!(validator_slash + delegator1_slash + delegator2_slash, slash_amount,
-            "Slashing proporcjonalny");
-        
-        println!("✅ Delegator slashing proportional: {}% penalty", SLASHING_PENALTY_PERCENT);
-    }
-
-    /// Test: Grace period before slashing execution
-    #[test]
-    fn test_slashing_grace_period() {
-        const GRACE_PERIOD_SLOTS: Slot = 14400;  // ~1 dzień
-        
-        let offense_detected_slot: Slot = 1000;
-        let current_slot: Slot = 5000;
-        
-        let grace_expired = current_slot >= offense_detected_slot + GRACE_PERIOD_SLOTS;
-        
-        assert!(!grace_expired, "Grace period nie minął - czas na dispute");
-        
-        println!("✅ Slashing grace period: {} slots for disputes", GRACE_PERIOD_SLOTS);
-    }
-}
-
-// ============================================================================
-// 9. INTEGRATION TESTS - COMBINED ATTACK SCENARIOS
-// ============================================================================
-
-mod integration_attacks {
-    use super::*;
-
-    /// Test: Combined Sybil + Stake attack
-    #[test]
-    fn test_combined_sybil_stake_attack() {
-        // Atakujący: 100 Sybil nodes + duży stake rozłożony między nie
-        let sybil_count = 100;
-        let total_attacker_stake: u128 = 10_000_000;
-        let stake_per_sybil = total_attacker_stake / sybil_count;
-        
-        // Honest validators
-        let honest_count = 50;
-        let honest_stake_per: u128 = 500_000;  // Mniej stake per validator
-        let honest_total_stake = honest_stake_per * honest_count;
-        
-        // Trust scores
-        let sybil_trust = q_from_f64(0.1);  // Nowi, niski trust
-        let honest_trust = q_from_f64(0.85);  // Ustabilizowani, wysoki trust
-        
-        // Weight calculation: 4*trust + 2*quality + 1*stake
-        let sybil_weight_per = 4 * sybil_trust as u128 + 0 + 1 * stake_per_sybil / 1000;
-        let honest_weight_per = 4 * honest_trust as u128 + 2 * q_from_f64(0.9) as u128 + 1 * honest_stake_per / 1000;
-        
-        let total_sybil_weight = sybil_weight_per * sybil_count as u128;
-        let total_honest_weight = honest_weight_per * honest_count;
-        
-        println!("  Sybil total weight: {}", total_sybil_weight);
-        println!("  Honest total weight: {}", total_honest_weight);
-        
-        assert!(total_honest_weight > total_sybil_weight, 
-            "Honest validators should dominate despite Sybil + stake attack");
-        
-        println!("✅ Combined Sybil + Stake attack defeated by trust system");
-    }
-
-    /// Test: Attack cost analysis
-    #[test]
-    fn test_attack_cost_analysis() {
-        // Koszt ataku 51%
-        let total_network_stake: u128 = 1_000_000_000;  // 1B tokens
-        let token_price_usd: f64 = 1.0;
-        
-        // Do ataku potrzeba >50% stake
-        let required_stake = total_network_stake / 2 + 1;
-        let attack_cost_usd = required_stake as f64 * token_price_usd;
-        
-        // ALE w TRUE TRUST: samo stake to tylko 1/7 wagi
-        // Trust (4/7) wymaga czasu i dobrego zachowania
-        // Quality (2/7) wymaga uczestnictwa
-        
-        let effective_attack_cost = attack_cost_usd * 7.0;  // x7 trudniej
-        
-        println!("  Pure PoS attack cost: ${:.0}M", attack_cost_usd / 1_000_000.0);
-        println!("  TRUE TRUST attack cost: ${:.0}M (7x harder)", effective_attack_cost / 1_000_000.0);
-        
-        assert!(effective_attack_cost > attack_cost_usd, 
-            "TRUE TRUST znacznie zwiększa koszt ataku");
-        
-        println!("✅ Attack cost multiplied by trust/quality requirements");
+        println!("✅ Stake update changes weight: {} -> {}", weight_100k, weight_1m);
     }
 }

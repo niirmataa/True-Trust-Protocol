@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use rand::rngs::OsRng;
 use rand::RngCore;
-use sha3::{Sha3_256, Shake256, digest::{ExtendableOutput, Update, XofReader}};
+use sha3::{Shake256, digest::{ExtendableOutput, Update, XofReader}};
 
 use pqcrypto_kyber::kyber768 as mlkem;
 use pqcrypto_falcon::falcon512;
@@ -33,27 +33,17 @@ use tt_node::private_stark_tx::{
     EncryptedSenderId,
     ConfidentialAmount,
     ViewKey,
-    compute_recipient_fingerprint,
     scan_recipient_output,
-    scan_sender_change,
     ScanResult,
 };
-use tt_node::stealth_registry::{
-    PrivateCompactTx,
-    StealthKeyRegistry,
-};
+use tt_node::stealth_registry::StealthKeyRegistry;
 use tt_node::falcon_sigs::{
-    falcon_keypair,
     falcon_sign,
     falcon_verify,
     falcon_pk_to_bytes,
     falcon_pk_from_bytes,
 };
-use tt_node::kyber_kem::{
-    kyber_encapsulate,
-    kyber_decapsulate,
-    kyber_ct_to_bytes,
-};
+use tt_node::kyber_kem::kyber_encapsulate;
 
 // ============================================================================
 // HELPERS
@@ -1201,7 +1191,7 @@ mod double_spend_cross_type {
 // ============================================================================
 
 mod mixed_privacy {
-    use super::*;
+    
     use std::collections::HashMap;
 
     /// Simulated multi-layer balance tracker

@@ -20,12 +20,6 @@ use tt_node::stealth_registry::{
     scan_recipient_output,
     scan_sender_change,
 };
-use tt_node::kyber_kem::{
-    kyber_keypair,
-    kyber_encapsulate,
-    kyber_decapsulate,
-    KyberSharedSecret,
-};
 use tt_node::falcon_sigs::{
     falcon_keypair,
     falcon_sign_nullifier,
@@ -33,7 +27,7 @@ use tt_node::falcon_sigs::{
     falcon_pk_to_bytes,
 };
 use tt_node::consensus_pro::ConsensusPro;
-use tt_node::rtt_pro::{TrustGraph, RTTConfig, q_from_f64, q_to_f64, ONE_Q};
+use tt_node::rtt_pro::{q_to_f64, ONE_Q};
 
 use pqcrypto_kyber::kyber768;
 use pqcrypto_traits::kem::SharedSecret as PQKemSharedSecret;
@@ -43,7 +37,7 @@ use pqcrypto_traits::kem::PublicKey as PQKemPublicKey;
 use std::collections::HashSet;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use sha3::{Sha3_256, Shake256};
+use sha3::Shake256;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 
 // ============================================================================

@@ -919,7 +919,7 @@ mod state_confusion {
 // ============================================================================
 
 mod integer_attacks {
-    use super::*;
+    
 
     /// Test: Amount overflow jest wykrywany
     #[test]
@@ -985,7 +985,7 @@ mod integer_attacks {
 // ============================================================================
 
 mod supply_chain {
-    use super::*;
+    
 
     /// Test: Znane dependencies mają właściwe wersje
     #[test]

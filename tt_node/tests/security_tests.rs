@@ -18,14 +18,8 @@ use tt_node::stealth_registry::{
     scan_recipient_output, scan_sender_change, ScanResult,
 };
 use tt_node::falcon_sigs::{
-    falcon_keypair, falcon_sign, falcon_verify, falcon_verify_bytes,
-    falcon_pk_from_bytes, falcon_pk_to_bytes,
-    FalconPublicKey, FalconSecretKey,
-};
-use tt_node::kyber_kem::{
-    kyber_keypair, kyber_encapsulate, kyber_decapsulate,
-    kyber_pk_from_bytes, kyber_sk_from_bytes,
-    kyber_pk_to_bytes, kyber_ct_from_bytes,
+    falcon_verify_bytes,
+    falcon_pk_from_bytes,
 };
 
 use pqcrypto_falcon::falcon512;

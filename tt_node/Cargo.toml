@@ -104,3 +104,8 @@ codegen-units = 1
 strip = true
 
  
+
+[[example]]
+name = "pq_determinism_test"
+path = "examples/pq_determinism_test.rs"
+required-features = ["seeded_kyber"]
