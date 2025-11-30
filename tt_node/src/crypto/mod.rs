@@ -3,6 +3,7 @@
 //! This module exposes only the pieces we actually use in the node:
 //! - KMAC256-based primitives (key derivation, XOF, MAC)
 //! - KMAC-DRBG (deterministic RNG)
+//! - Hardware RNG (true entropy from /dev/urandom + RDRAND)
 //! - Deterministic Falcon integration (via falcon_seeded)
 //! - Deterministic Kyber-768 keypair (via pqc_kyber)
 //! - Kyber-768 KEM helpers
@@ -10,6 +11,8 @@
 
 pub mod kmac;
 pub mod kmac_drbg;
+pub mod hardware_rng;
+pub mod nonce_tracker;
 pub mod seeded;
 #[cfg(feature = "seeded_kyber")]
 pub mod seeded_kyber;

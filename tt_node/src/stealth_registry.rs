@@ -69,6 +69,8 @@ use crate::kyber_kem::{
 use crate::falcon_sigs::{
     FalconSecretKey,
     falcon_pk_from_bytes,
+    falcon_verify,
+    SignedNullifier,
 };
 
 /// Domain separators
@@ -77,6 +79,7 @@ const MASTER_KEY_DOMAIN: &[u8] = b"TT.v7.MASTER_KEY_ID";
 const VIEW_TAG_DOMAIN: &[u8] = b"TT.v7.VIEW_TAG";
 const SELF_STEALTH_DOMAIN: &[u8] = b"TT.v7.SELF_STEALTH";
 const SENDER_ID_ENC_DOMAIN: &[u8] = b"TT.v7.SENDER_ID_ENC";
+const PROOF_OF_POSSESSION_DOMAIN: &[u8] = b"TT.v7.PROOF_OF_POSSESSION";
 
 // ============================================================================
 // MASTER KEY REGISTRY
@@ -121,6 +124,16 @@ impl StealthKeyRegistry {
     }
 
     /// Rejestruj master key (jednorazowo)
+    /// 
+    /// # ⚠️ DEPRECATED - Use `register_with_proof()` instead!
+    /// 
+    /// This method does NOT verify proof-of-possession, which means:
+    /// - Random bytes can be registered as "valid" keys
+    /// - Attackers can register stolen public keys
+    /// - Funds sent to fake keys are LOST FOREVER
+    /// 
+    /// Only use this method for testing or migration purposes.
+    #[deprecated(since = "0.8.0", note = "Use register_with_proof() which requires cryptographic proof of key ownership")]
     pub fn register(
         &mut self,
         falcon_pk: Vec<u8>,
@@ -159,6 +172,130 @@ impl StealthKeyRegistry {
         self.total_registered += 1;
 
         Ok(master_key_id)
+    }
+
+    /// Rejestruj master key z proof-of-possession (ZALECANE!)
+    /// 
+    /// Wymaga podpisu challenge = SHAKE256(PROOF_OF_POSSESSION_DOMAIN || falcon_pk || kyber_pk)
+    /// co udowadnia że rejestrujący posiada klucz prywatny Falcon.
+    /// 
+    /// # Arguments
+    /// * `falcon_pk` - Falcon-512 public key (897 bytes)
+    /// * `kyber_pk` - Kyber-768 public key (1184 bytes)
+    /// * `proof_signature` - Podpis challenge przez odpowiadający Falcon SK
+    /// * `timestamp` - Timestamp rejestracji
+    /// * `block_height` - Wysokość bloku
+    /// 
+    /// # Security
+    /// Ta metoda jest odporna na:
+    /// - Rejestrację losowych/fałszywych kluczy
+    /// - Kradzież cudzych kluczy publicznych
+    /// - All-zeros i inne podejrzane wzorce
+    pub fn register_with_proof(
+        &mut self,
+        falcon_pk: Vec<u8>,
+        kyber_pk: Vec<u8>,
+        proof_signature: &SignedNullifier,
+        timestamp: u64,
+        block_height: u64,
+    ) -> Result<[u8; 32], StealthRegistryError> {
+        // 1. Sprawdź podejrzane wzorce kluczy
+        Self::check_suspicious_pattern(&falcon_pk, "Falcon")?;
+        Self::check_suspicious_pattern(&kyber_pk, "Kyber")?;
+        
+        // 2. Parsuj klucz Falcon (sprawdza długość)
+        let falcon_pk_parsed = falcon_pk_from_bytes(&falcon_pk)
+            .map_err(|e| StealthRegistryError::InvalidFalconKeyFormat(e.to_string()))?;
+        
+        // 3. Walidacja Kyber PK
+        if let Err(e) = kyber_pk_from_bytes(&kyber_pk) {
+            return Err(StealthRegistryError::InvalidKyberKeyFormat(e.to_string()));
+        }
+        
+        // 4. Oblicz challenge do podpisu
+        let challenge = Self::compute_proof_challenge(&falcon_pk, &kyber_pk);
+        
+        // 5. Weryfikuj proof-of-possession - to jest KLUCZOWE!
+        falcon_verify(&challenge, proof_signature, &falcon_pk_parsed)
+            .map_err(|e| StealthRegistryError::InvalidProofOfPossession(
+                format!("Signature verification failed: {}", e)
+            ))?;
+        
+        // 6. Deterministyczny master_key_id
+        let master_key_id = Self::compute_master_key_id(&falcon_pk, &kyber_pk);
+        
+        // 7. Idempotencja
+        if self.master_keys.contains_key(&master_key_id) {
+            return Ok(master_key_id);
+        }
+        
+        // 8. Zapis do registry
+        self.master_keys.insert(
+            master_key_id,
+            MasterKey {
+                falcon_pk,
+                kyber_pk,
+                registered_at: timestamp,
+                registered_block: block_height,
+            },
+        );
+        self.total_registered += 1;
+        
+        Ok(master_key_id)
+    }
+    
+    /// Oblicz challenge dla proof-of-possession
+    /// 
+    /// Challenge = SHAKE256(PROOF_OF_POSSESSION_DOMAIN || falcon_pk || kyber_pk)
+    pub fn compute_proof_challenge(falcon_pk: &[u8], kyber_pk: &[u8]) -> Vec<u8> {
+        let mut h = Shake256::default();
+        h.update(PROOF_OF_POSSESSION_DOMAIN);
+        h.update(falcon_pk);
+        h.update(kyber_pk);
+        let mut challenge = vec![0u8; 64];
+        h.finalize_xof().read(&mut challenge);
+        challenge
+    }
+    
+    /// Sprawdź czy klucz ma podejrzany wzorzec
+    fn check_suspicious_pattern(key: &[u8], key_type: &str) -> Result<(), StealthRegistryError> {
+        if key.is_empty() {
+            return Err(StealthRegistryError::SuspiciousKeyPattern(
+                format!("{} key is empty", key_type)
+            ));
+        }
+        
+        // All zeros
+        if key.iter().all(|&b| b == 0) {
+            return Err(StealthRegistryError::SuspiciousKeyPattern(
+                format!("{} key is all zeros - this is invalid!", key_type)
+            ));
+        }
+        
+        // All ones
+        if key.iter().all(|&b| b == 0xFF) {
+            return Err(StealthRegistryError::SuspiciousKeyPattern(
+                format!("{} key is all 0xFF - this is invalid!", key_type)
+            ));
+        }
+        
+        // Single repeated byte (very low entropy)
+        let first = key[0];
+        if key.iter().all(|&b| b == first) {
+            return Err(StealthRegistryError::SuspiciousKeyPattern(
+                format!("{} key has single repeated byte 0x{:02X} - too low entropy!", key_type, first)
+            ));
+        }
+        
+        // Check entropy - count unique bytes
+        let unique_bytes: std::collections::HashSet<u8> = key.iter().copied().collect();
+        if unique_bytes.len() < 32 {
+            return Err(StealthRegistryError::SuspiciousKeyPattern(
+                format!("{} key has only {} unique bytes - too low entropy!", key_type, unique_bytes.len())
+            ));
+        }
+        
+        Ok(())
     }
 
     /// Pobierz master key
@@ -769,6 +906,10 @@ pub enum StealthRegistryError {
     InvalidFalconKeyFormat(String),
     InvalidKyberKeyFormat(String),
     MasterKeyNotFound([u8; 32]),
+    /// Proof-of-possession failed - user doesn't own the private key
+    InvalidProofOfPossession(String),
+    /// Key has suspicious pattern (all zeros, all ones, etc.)
+    SuspiciousKeyPattern(String),
 }
 
 impl std::fmt::Display for StealthRegistryError {
@@ -777,6 +918,8 @@ impl std::fmt::Display for StealthRegistryError {
             Self::InvalidFalconKeyFormat(e) => write!(f, "Invalid Falcon public key format: {e}"),
             Self::InvalidKyberKeyFormat(e) => write!(f, "Invalid Kyber public key format: {e}"),
             Self::MasterKeyNotFound(id) => write!(f, "Master key not found: {}", hex::encode(&id[..8])),
+            Self::InvalidProofOfPossession(e) => write!(f, "Proof-of-possession failed: {e}"),
+            Self::SuspiciousKeyPattern(e) => write!(f, "Suspicious key pattern: {e}"),
         }
     }
 }

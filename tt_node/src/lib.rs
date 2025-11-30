@@ -32,3 +32,4 @@ pub mod private_stark_tx;
 pub mod p2p;
 pub mod rpc;
 pub mod wallet;
+pub mod consensus;
