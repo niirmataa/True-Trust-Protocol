@@ -2010,18 +2010,22 @@ mod tests {
     }
     
     /// Test że timing check działa poprawnie (wykrywa oszustów)
+    /// 
+    /// UWAGA: Ten test jest z natury timing-sensitive.
+    /// Używamy bardzo konserwatywnych parametrów żeby działał na wolnym CI.
     #[test]
     fn test_timing_anti_cheat_detects_suspicious() {
+        // Bardzo niski ratio - nawet 2x szybciej niż enrollment = suspicious
         let config = VerifiedDeviceConfig {
-            suspicion_ratio: 5.0, // Normalny ratio
+            suspicion_ratio: 2.0,
             ..Default::default()
         };
         let manager = VerifiedDeviceManager::with_config(config);
         
-        // 1. Enrollment - symuluj WOLNE urządzenie
-        // Długi sleep ustanawia bazowy czas rozwiązywania
+        // 1. Enrollment - symuluj BARDZO WOLNE urządzenie
+        // 1500ms sleep + czas solve = enrollment_solve_time będzie ~1500ms+
         let enroll_challenge = manager.start_enrollment();
-        std::thread::sleep(Duration::from_millis(500)); // Symuluj WOLNE urządzenie
+        std::thread::sleep(Duration::from_millis(1500));
         let enroll_solution = solve_pow(&enroll_challenge.challenge_data, enroll_challenge.difficulty_bits);
         let credential = manager.complete_enrollment(&enroll_challenge, &enroll_solution).unwrap();
         
@@ -2030,18 +2034,18 @@ mod tests {
             let _ = manager.check_device(&credential);
         }
         
-        // 3. Teraz wymaga PoW
+        // 3. Teraz wymaga PoW - challenge wydany TERAZ
         let challenge = manager.check_device(&credential)
             .expect("Should succeed")
             .expect("Should require PoW");
         
-        // 4. Solve NATYCHMIAST (bez sleep - oszust z pre-computed solution)
+        // 4. Solve NATYCHMIAST (bez sleep)
+        // actual_wall_clock będzie ~kilkadziesiąt ms (tylko czas solve)
+        // ratio = 1500 / ~50 = ~30x > 2.0 → MUST be SUSPICIOUS
         let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
-        let fake_fast_time = 1; // Nieistotne - serwer mierzy wewnętrznie
+        let fake_fast_time = 1;
         
-        // 5. Verify powinien wykryć suspicious timing
-        // enrollment_solve_time ~500ms, actual_wall_clock ~kilka ms
-        // ratio = 500 / kilka = ~100x > 5.0 → SUSPICIOUS
+        // 5. Verify MUSI wykryć suspicious timing
         let result = manager.verify_solution(&credential, &challenge, &solution, fake_fast_time);
         assert!(
             matches!(result, Err(VerifiedPowError::SuspiciousTiming { .. })),

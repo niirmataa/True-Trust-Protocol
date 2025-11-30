@@ -515,6 +515,250 @@ mod tests {
         
         falcon_verify_nullifier(&nullifier, &sig, &pk2).unwrap();
     }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // SECURITY ATTACK TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    /// ATAK: Podmieniony klucz publiczny
+    /// Atakujący próbuje użyć cudzego klucza do weryfikacji
+    #[test]
+    fn test_attack_substituted_public_key() {
+        let (pk_victim, sk_victim) = falcon_keypair();
+        let (pk_attacker, _sk_attacker) = falcon_keypair();
+        
+        let nullifier = [0x42u8; 32];
+        let sig = falcon_sign_nullifier(&nullifier, &sk_victim).unwrap();
+        
+        // Atakujący próbuje podmienić klucz
+        let result = falcon_verify_nullifier(&nullifier, &sig, &pk_attacker);
+        assert!(result.is_err(), "Substituted public key MUST fail verification");
+    }
+    
+    /// ATAK: Bit-flip w podpisie
+    /// Sprawdza że nawet 1-bitowa zmiana w podpisie jest wykrywana
+    #[test]
+    fn test_attack_signature_bit_flip() {
+        let (pk, sk) = falcon_keypair();
+        let nullifier = [0x42u8; 32];
+        
+        let sig = falcon_sign_nullifier(&nullifier, &sk).unwrap();
+        
+        // Zmodyfikuj 1 bit w różnych miejscach podpisu
+        for byte_idx in [0, 10, 50, 100, 200, 400, 600] {
+            if byte_idx < sig.signed_message_bytes.len() {
+                let mut tampered = sig.signed_message_bytes.clone();
+                tampered[byte_idx] ^= 0x01; // Flip 1 bit
+                
+                let tampered_sig = SignedNullifier {
+                    signed_message_bytes: tampered,
+                };
+                
+                let result = falcon_verify_nullifier(&nullifier, &tampered_sig, &pk);
+                assert!(result.is_err(), 
+                    "Bit-flip at byte {} MUST invalidate signature", byte_idx);
+            }
+        }
+    }
+    
+    /// ATAK: Truncated signature
+    /// Sprawdza że obcięty podpis jest odrzucany
+    #[test]
+    fn test_attack_truncated_signature() {
+        let (pk, sk) = falcon_keypair();
+        let nullifier = [0x42u8; 32];
+        
+        let sig = falcon_sign_nullifier(&nullifier, &sk).unwrap();
+        let original_len = sig.signed_message_bytes.len();
+        
+        // Różne długości obcięcia
+        for truncate_to in [0, 10, 100, 300, 500, original_len - 1] {
+            let truncated = SignedNullifier {
+                signed_message_bytes: sig.signed_message_bytes[..truncate_to].to_vec(),
+            };
+            
+            let result = falcon_verify_nullifier(&nullifier, &truncated, &pk);
+            assert!(result.is_err(), 
+                "Truncated signature (len={}) MUST be rejected", truncate_to);
+        }
+    }
+    
+    /// ATAK: Extended signature (dodanie bajtów)
+    /// Sprawdza że podpis z dodatkowymi bajtami jest odrzucany
+    #[test]
+    fn test_attack_extended_signature() {
+        let (pk, sk) = falcon_keypair();
+        let nullifier = [0x42u8; 32];
+        
+        let sig = falcon_sign_nullifier(&nullifier, &sk).unwrap();
+        
+        // Dodaj bajty na końcu
+        let mut extended = sig.signed_message_bytes.clone();
+        extended.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        
+        let extended_sig = SignedNullifier {
+            signed_message_bytes: extended,
+        };
+        
+        let result = falcon_verify_nullifier(&nullifier, &extended_sig, &pk);
+        assert!(result.is_err(), "Extended signature MUST be rejected");
+    }
+    
+    /// ATAK: Empty signature
+    #[test]
+    fn test_attack_empty_signature() {
+        let (pk, _sk) = falcon_keypair();
+        let nullifier = [0x42u8; 32];
+        
+        let empty_sig = SignedNullifier {
+            signed_message_bytes: vec![],
+        };
+        
+        let result = falcon_verify_nullifier(&nullifier, &empty_sig, &pk);
+        assert!(result.is_err(), "Empty signature MUST be rejected");
+    }
+    
+    /// ATAK: Garbage signature
+    #[test]
+    fn test_attack_garbage_signature() {
+        let (pk, _sk) = falcon_keypair();
+        let nullifier = [0x42u8; 32];
+        
+        // Random garbage (200 bytes)
+        let garbage_sig = SignedNullifier {
+            signed_message_bytes: vec![0xDEu8; 200],
+        };
+        
+        let result = falcon_verify_nullifier(&nullifier, &garbage_sig, &pk);
+        assert!(result.is_err(), "Garbage signature MUST be rejected");
+    }
+    
+    /// ATAK: Signature replay (ten sam podpis dla innej wiadomości)
+    #[test]
+    fn test_attack_signature_replay() {
+        let (pk, sk) = falcon_keypair();
+        let nullifier1 = [0x11u8; 32];
+        let nullifier2 = [0x22u8; 32];
+        
+        // Podpisz nullifier1
+        let sig = falcon_sign_nullifier(&nullifier1, &sk).unwrap();
+        
+        // Próba użycia tego samego podpisu dla nullifier2
+        let result = falcon_verify_nullifier(&nullifier2, &sig, &pk);
+        assert!(result.is_err(), "Signature replay for different message MUST fail");
+    }
+    
+    /// ATAK: Truncated public key
+    #[test]
+    fn test_attack_truncated_public_key() {
+        let (pk, _sk) = falcon_keypair();
+        let pk_bytes = falcon_pk_to_bytes(&pk);
+        
+        // Różne długości obcięcia
+        for len in [0, 100, 500, 896] {
+            let result = falcon_pk_from_bytes(&pk_bytes[..len]);
+            assert!(result.is_err(), 
+                "Truncated public key (len={}) MUST be rejected", len);
+        }
+    }
+    
+    /// ATAK: Oversized public key
+    #[test]
+    fn test_attack_oversized_public_key() {
+        let (pk, _sk) = falcon_keypair();
+        let mut pk_bytes = falcon_pk_to_bytes(&pk).to_vec();
+        pk_bytes.extend_from_slice(&[0x00; 100]); // Dodaj 100 bajtów
+        
+        let result = falcon_pk_from_bytes(&pk_bytes);
+        assert!(result.is_err(), "Oversized public key MUST be rejected");
+    }
+    
+    /// ATAK: Forged signature from different keypair
+    /// Atakujący generuje podpis własnym kluczem i próbuje przedstawić jako ofiary
+    #[test]
+    fn test_attack_forged_signature_different_keypair() {
+        let (pk_victim, _sk_victim) = falcon_keypair();
+        let (_pk_attacker, sk_attacker) = falcon_keypair();
+        
+        let nullifier = [0x42u8; 32];
+        
+        // Atakujący podpisuje własnym kluczem
+        let forged_sig = falcon_sign_nullifier(&nullifier, &sk_attacker).unwrap();
+        
+        // Próba weryfikacji kluczem ofiary
+        let result = falcon_verify_nullifier(&nullifier, &forged_sig, &pk_victim);
+        assert!(result.is_err(), "Forged signature from different keypair MUST fail");
+    }
+    
+    /// Test: Podpisy są niedeterministyczne (różne dla tej samej wiadomości)
+    #[test]
+    fn test_signatures_are_randomized() {
+        let (pk, sk) = falcon_keypair();
+        let nullifier = [0x42u8; 32];
+        
+        let sig1 = falcon_sign_nullifier(&nullifier, &sk).unwrap();
+        let sig2 = falcon_sign_nullifier(&nullifier, &sk).unwrap();
+        
+        // Oba podpisy powinny być poprawne
+        falcon_verify_nullifier(&nullifier, &sig1, &pk).unwrap();
+        falcon_verify_nullifier(&nullifier, &sig2, &pk).unwrap();
+        
+        // Ale różne (randomizacja)
+        assert_ne!(
+            sig1.signed_message_bytes, 
+            sig2.signed_message_bytes,
+            "Falcon signatures should be randomized"
+        );
+    }
+    
+    /// Test: Avalanche effect - mała zmiana wiadomości = duża zmiana podpisu
+    #[test]
+    fn test_avalanche_effect() {
+        let (pk, sk) = falcon_keypair();
+        
+        let msg1 = [0x00u8; 32];
+        let mut msg2 = [0x00u8; 32];
+        msg2[0] = 0x01; // Zmień tylko 1 bit
+        
+        let sig1 = falcon_sign_nullifier(&msg1, &sk).unwrap();
+        let sig2 = falcon_sign_nullifier(&msg2, &sk).unwrap();
+        
+        // Podpisy powinny być diametralnie różne
+        let mut diff_bits = 0u32;
+        let min_len = sig1.signed_message_bytes.len().min(sig2.signed_message_bytes.len());
+        for i in 0..min_len {
+            diff_bits += (sig1.signed_message_bytes[i] ^ sig2.signed_message_bytes[i]).count_ones();
+        }
+        
+        // Powinno być > 25% bitów różnych (strong avalanche)
+        let total_bits = (min_len * 8) as u32;
+        let diff_ratio = diff_bits as f64 / total_bits as f64;
+        
+        assert!(diff_ratio > 0.25, 
+            "Avalanche effect too weak: only {:.1}% bits differ", diff_ratio * 100.0);
+    }
+    
+    /// Test: verify_bytes API security
+    #[test]
+    fn test_verify_bytes_security() {
+        let (pk, sk) = falcon_keypair();
+        let message = b"test message for bytes API";
+        
+        let sig = falcon_sign(message, &sk).unwrap();
+        
+        // Valid verification
+        falcon_verify_bytes(message, &sig.signed_message_bytes, &pk).unwrap();
+        
+        // Tampered message
+        let result = falcon_verify_bytes(b"wrong message", &sig.signed_message_bytes, &pk);
+        assert!(result.is_err(), "Wrong message MUST fail");
+        
+        // Tampered signature
+        let mut tampered_sig = sig.signed_message_bytes.clone();
+        tampered_sig[100] ^= 0xFF;
+        let result = falcon_verify_bytes(message, &tampered_sig, &pk);
+        assert!(result.is_err(), "Tampered signature MUST fail");
+    }
 }
 
 // ============================================================================
