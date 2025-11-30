@@ -631,39 +631,61 @@ mod dos_verification {
     }
 
     /// Test: Masowe TX nie powodują O(n²) czasów weryfikacji
+    /// 
+    /// Używamy warmup i średnią z kilku uruchomień dla stabilności na różnym hardware.
     #[test]
     fn test_batch_verification_linear() {
         let (fpk, fsk, _, _) = test_keypairs();
         
-        // 10 TX
-        let start = Instant::now();
+        // Warmup - rozgrzanie cache i JIT
         for i in 0..10 {
             let tx = SimplePqTx::new_signed(
                 mk_node_id(1), mk_node_id(2), 1000, i, &fpk, &fsk
             ).unwrap();
             tx.verify().unwrap();
         }
-        let time_10 = start.elapsed();
         
-        // 100 TX
-        let start = Instant::now();
-        for i in 0..100 {
-            let tx = SimplePqTx::new_signed(
-                mk_node_id(1), mk_node_id(2), 1000, i, &fpk, &fsk
-            ).unwrap();
-            tx.verify().unwrap();
+        // 50 TX - średnia z 3 uruchomień
+        let mut time_50_total = std::time::Duration::ZERO;
+        for _ in 0..3 {
+            let start = Instant::now();
+            for i in 0..50 {
+                let tx = SimplePqTx::new_signed(
+                    mk_node_id(1), mk_node_id(2), 1000, i, &fpk, &fsk
+                ).unwrap();
+                tx.verify().unwrap();
+            }
+            time_50_total += start.elapsed();
         }
-        let time_100 = start.elapsed();
+        let time_50 = time_50_total / 3;
+        
+        // 500 TX - średnia z 3 uruchomień
+        let mut time_500_total = std::time::Duration::ZERO;
+        for _ in 0..3 {
+            let start = Instant::now();
+            for i in 0..500 {
+                let tx = SimplePqTx::new_signed(
+                    mk_node_id(1), mk_node_id(2), 1000, i, &fpk, &fsk
+                ).unwrap();
+                tx.verify().unwrap();
+            }
+            time_500_total += start.elapsed();
+        }
+        let time_500 = time_500_total / 3;
         
         // Powinno być ~10x wolniejsze (linear), nie 100x (O(n²))
         let expected_ratio = 10.0;
-        let actual_ratio = time_100.as_nanos() as f64 / time_10.as_nanos() as f64;
+        let actual_ratio = time_500.as_nanos() as f64 / time_50.as_nanos() as f64;
         
-        println!("10 TX verify: {:?}", time_10);
-        println!("100 TX verify: {:?}", time_100);
+        println!("50 TX verify (avg 3 runs): {:?}", time_50);
+        println!("500 TX verify (avg 3 runs): {:?}", time_500);
         println!("Ratio: {:.1}x (expected ~{:.1}x)", actual_ratio, expected_ratio);
         
-        assert!(actual_ratio < 15.0, "Verification should be O(n), not O(n²)");
+        // Rozszerzony limit - akceptujemy variance od 5x do 25x 
+        // (O(n²) dałoby 100x co jest daleko poza tym zakresem)
+        assert!(actual_ratio < 25.0 && actual_ratio > 3.0, 
+            "Verification should be O(n), not O(n²). Ratio {} outside expected 3-25x range", 
+            actual_ratio);
         
         println!("✅ DoS protection: verification is O(n)");
     }

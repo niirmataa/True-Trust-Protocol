@@ -733,10 +733,11 @@ struct DeviceState {
     suspicion_count: u32,
     /// Ban do kiedy
     banned_until: Option<Instant>,
-    /// Oczekujące challenge - przechowujemy PEŁNY challenge, nie tylko hash!
-    /// Klucz: challenge_data, Wartość: pełny PersonalizedChallenge
+    /// Oczekujące challenge - przechowujemy PEŁNY challenge wraz z Instant!
+    /// Klucz: challenge_data, Wartość: (pełny PersonalizedChallenge, Instant wydania)
     /// KRYTYCZNE: dzięki temu klient nie może manipulować difficulty_bits ani timestamps
-    pending_challenges: HashMap<[u8; 32], PersonalizedChallenge>,
+    /// Instant daje nam precyzję milisekundową dla timing checks
+    pending_challenges: HashMap<[u8; 32], (PersonalizedChallenge, Instant)>,
     /// Zmierzony czas podczas enrollment (bazowy)
     enrollment_solve_time_ms: u64,
 }
@@ -954,16 +955,17 @@ impl VerifiedDeviceManager {
             load,
         );
         
-        // KRYTYCZNE: zapisujemy PEŁNY challenge, nie tylko hash!
+        // KRYTYCZNE: zapisujemy PEŁNY challenge wraz z Instant!
         // Dzięki temu klient nie może manipulować difficulty_bits ani timestamps
-        state.pending_challenges.insert(challenge.challenge_data, challenge.clone());
+        // Instant daje nam precyzję milisekundową dla timing checks
+        state.pending_challenges.insert(challenge.challenge_data, (challenge.clone(), Instant::now()));
         
         // Cleanup - usuń najstarsze jeśli za dużo
         if state.pending_challenges.len() > 10 {
             // Znajdź najstarszy challenge
             if let Some(oldest_key) = state.pending_challenges
                 .iter()
-                .min_by_key(|(_, c)| c.created_at)
+                .min_by_key(|(_, (c, _))| c.created_at)
                 .map(|(k, _)| *k)
             {
                 state.pending_challenges.remove(&oldest_key);
@@ -1006,7 +1008,8 @@ impl VerifiedDeviceManager {
         
         // 4. Pobierz SERWEROWĄ wersję challenge - jedyne źródło prawdy!
         // KRYTYCZNE: używamy client_challenge.challenge_data TYLKO jako klucz lookupu
-        let stored_challenge = {
+        // Pobieramy też Instant dla precyzyjnego pomiaru czasu (milisekundy!)
+        let (stored_challenge, challenge_issued_at) = {
             let devices = self.devices.read().unwrap();
             let state = devices.get(&credential.device_id)
                 .ok_or(VerifiedPowError::DeviceIdMismatch)?;
@@ -1034,18 +1037,15 @@ impl VerifiedDeviceManager {
         }
         
         // 8. Sprawdź timing (anti-cheat)
-        // Mierzymy czas od wydania challenge do teraz (spójne z enrollment!)
-        let now_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let actual_wall_clock_ms = (now_ts.saturating_sub(stored_challenge.created_at)) * 1000;
+        // Mierzymy czas od wydania challenge do teraz używając Instant (precyzja ms!)
+        // To jest spójne z complete_enrollment() które też używa Instant
+        let actual_wall_clock_ms = challenge_issued_at.elapsed().as_millis() as u64;
         
         let devices = self.devices.read().unwrap();
         if let Some(state) = devices.get(&credential.device_id) {
             let expected_ms = state.enrollment_solve_time_ms;
             // Użyj WEWNĘTRZNEGO pomiaru wall-clock (spójne z enrollment)
-            // server_measured_ms zachowujemy dla logów, ale nie do porównania
+            // server_measured_ms zachowujemy dla logów, ale używamy actual_wall_clock_ms
             let check_ms = if actual_wall_clock_ms > 0 { actual_wall_clock_ms } else { server_measured_ms };
             
             // Dopuszczamy variance, ale nie 5x szybciej
@@ -2018,9 +2018,10 @@ mod tests {
         };
         let manager = VerifiedDeviceManager::with_config(config);
         
-        // 1. Enrollment - symuluj wolne urządzenie (1000ms)
+        // 1. Enrollment - symuluj WOLNE urządzenie
+        // Długi sleep ustanawia bazowy czas rozwiązywania
         let enroll_challenge = manager.start_enrollment();
-        std::thread::sleep(Duration::from_millis(100)); // Symuluj czas rozwiązywania
+        std::thread::sleep(Duration::from_millis(500)); // Symuluj WOLNE urządzenie
         let enroll_solution = solve_pow(&enroll_challenge.challenge_data, enroll_challenge.difficulty_bits);
         let credential = manager.complete_enrollment(&enroll_challenge, &enroll_solution).unwrap();
         
@@ -2034,11 +2035,13 @@ mod tests {
             .expect("Should succeed")
             .expect("Should require PoW");
         
-        // 4. Solve bardzo szybko (symulacja oszustwa - 10x szybciej)
+        // 4. Solve NATYCHMIAST (bez sleep - oszust z pre-computed solution)
         let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
-        let fake_fast_time = 1; // Oszust twierdzi że rozwiązał w 1ms
+        let fake_fast_time = 1; // Nieistotne - serwer mierzy wewnętrznie
         
         // 5. Verify powinien wykryć suspicious timing
+        // enrollment_solve_time ~500ms, actual_wall_clock ~kilka ms
+        // ratio = 500 / kilka = ~100x > 5.0 → SUSPICIOUS
         let result = manager.verify_solution(&credential, &challenge, &solution, fake_fast_time);
         assert!(
             matches!(result, Err(VerifiedPowError::SuspiciousTiming { .. })),
