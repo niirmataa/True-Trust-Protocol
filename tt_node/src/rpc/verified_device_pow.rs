@@ -1034,18 +1034,29 @@ impl VerifiedDeviceManager {
         }
         
         // 8. Sprawdź timing (anti-cheat)
+        // Mierzymy czas od wydania challenge do teraz (spójne z enrollment!)
+        let now_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let actual_wall_clock_ms = (now_ts.saturating_sub(stored_challenge.created_at)) * 1000;
+        
         let devices = self.devices.read().unwrap();
         if let Some(state) = devices.get(&credential.device_id) {
             let expected_ms = state.enrollment_solve_time_ms;
+            // Użyj WEWNĘTRZNEGO pomiaru wall-clock (spójne z enrollment)
+            // server_measured_ms zachowujemy dla logów, ale nie do porównania
+            let check_ms = if actual_wall_clock_ms > 0 { actual_wall_clock_ms } else { server_measured_ms };
+            
             // Dopuszczamy variance, ale nie 5x szybciej
-            if server_measured_ms > 0 && expected_ms > 0 {
-                let ratio = expected_ms as f64 / server_measured_ms as f64;
+            if check_ms > 0 && expected_ms > 0 {
+                let ratio = expected_ms as f64 / check_ms as f64;
                 if ratio > self.config.suspicion_ratio {
                     drop(devices);
                     self.report_suspicious(&credential.device_id);
                     return Err(VerifiedPowError::SuspiciousTiming {
                         expected_ms,
-                        actual_ms: server_measured_ms,
+                        actual_ms: check_ms,
                     });
                 }
             }
@@ -1966,6 +1977,7 @@ mod tests {
     
     #[test]
     fn test_full_verified_flow() {
+        // Użyj normalnej konfiguracji - timing check jest teraz spójny
         let manager = VerifiedDeviceManager::new();
         
         // 1. Enrollment
@@ -1995,6 +2007,43 @@ mod tests {
         // 6. Replay powinien być odrzucony
         let replay = manager.verify_solution(&credential, &challenge, &solution, server_measured);
         assert!(matches!(replay, Err(VerifiedPowError::ChallengeAlreadyUsed)));
+    }
+    
+    /// Test że timing check działa poprawnie (wykrywa oszustów)
+    #[test]
+    fn test_timing_anti_cheat_detects_suspicious() {
+        let config = VerifiedDeviceConfig {
+            suspicion_ratio: 5.0, // Normalny ratio
+            ..Default::default()
+        };
+        let manager = VerifiedDeviceManager::with_config(config);
+        
+        // 1. Enrollment - symuluj wolne urządzenie (1000ms)
+        let enroll_challenge = manager.start_enrollment();
+        std::thread::sleep(Duration::from_millis(100)); // Symuluj czas rozwiązywania
+        let enroll_solution = solve_pow(&enroll_challenge.challenge_data, enroll_challenge.difficulty_bits);
+        let credential = manager.complete_enrollment(&enroll_challenge, &enroll_solution).unwrap();
+        
+        // 2. Wyczerpaj burst
+        for _ in 0..5 {
+            let _ = manager.check_device(&credential);
+        }
+        
+        // 3. Teraz wymaga PoW
+        let challenge = manager.check_device(&credential)
+            .expect("Should succeed")
+            .expect("Should require PoW");
+        
+        // 4. Solve bardzo szybko (symulacja oszustwa - 10x szybciej)
+        let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
+        let fake_fast_time = 1; // Oszust twierdzi że rozwiązał w 1ms
+        
+        // 5. Verify powinien wykryć suspicious timing
+        let result = manager.verify_solution(&credential, &challenge, &solution, fake_fast_time);
+        assert!(
+            matches!(result, Err(VerifiedPowError::SuspiciousTiming { .. })),
+            "Should detect suspicious timing, got: {:?}", result
+        );
     }
     
     #[test]
@@ -2184,5 +2233,301 @@ mod tests {
         }
         
         assert_eq!(manager.metrics.burst_used.load(Ordering::Relaxed), 3);
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // SECURITY ATTACK TESTS - Realne wektory ataku
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    /// ATAK: Podmieniony klucz serwera - atakujący generuje własny ServerSigningKey
+    #[test]
+    fn test_attack_forged_server_key() {
+        let legitimate_server = VerifiedDeviceManager::new();
+        let attacker_server = ServerSigningKey::new(); // Atakujący tworzy własny klucz
+        
+        // Atakujący tworzy credential podpisany SWOIM kluczem
+        let fake_credential = DeviceCredential {
+            device_id: [0xAA; 16],
+            power_class: VerifiedPowerClass::VeryFast, // Próbuje być VeryFast
+            measured_hash_rate: 1_000_000,
+            issued_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            valid_for_secs: 3600 * 24 * 365, // Rok ważności
+            server_signature: attacker_server.sign(&{
+                let mut data = Vec::new();
+                data.extend_from_slice(&[0xAA; 16]);
+                data.extend_from_slice(&(VerifiedPowerClass::VeryFast as u8).to_le_bytes());
+                data.extend_from_slice(&1_000_000u64.to_le_bytes());
+                data.extend_from_slice(&SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs().to_le_bytes());
+                data.extend_from_slice(&(3600u64 * 24 * 365).to_le_bytes());
+                data
+            }),
+        };
+        
+        // Próba użycia na legitnym serwerze - MUSI być odrzucona
+        let result = legitimate_server.check_device(&fake_credential);
+        assert!(
+            matches!(result, Err(VerifiedPowError::InvalidCredentialSignature)),
+            "Forged credential should be rejected, got: {:?}", result
+        );
+    }
+    
+    /// ATAK: Credential z przyszłości - atakujący ustawia issued_at w przyszłości
+    #[test]
+    fn test_attack_future_credential() {
+        let manager = VerifiedDeviceManager::new();
+        
+        // Enrollment - zdobądź prawdziwy credential
+        let challenge = manager.start_enrollment();
+        let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
+        let mut credential = manager.complete_enrollment(&challenge, &solution).unwrap();
+        
+        // Atakujący modyfikuje issued_at na przyszłość (żeby nigdy nie wygasł)
+        credential.issued_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 86400 * 365;
+        
+        // To powinno być odrzucone bo podpis nie pasuje do zmodyfikowanych danych
+        let result = manager.check_device(&credential);
+        assert!(
+            matches!(result, Err(VerifiedPowError::InvalidCredentialSignature)),
+            "Modified credential should fail signature check, got: {:?}", result
+        );
+    }
+    
+    /// ATAK: Expired credential - testowanie is_valid()
+    #[test]
+    fn test_attack_expired_credential() {
+        let manager = VerifiedDeviceManager::new();
+        
+        // Stwórz credential który już wygasł
+        let expired_credential = DeviceCredential {
+            device_id: [0xBB; 16],
+            power_class: VerifiedPowerClass::Medium,
+            measured_hash_rate: 50000,
+            issued_at: 1000, // Bardzo stary timestamp (1970)
+            valid_for_secs: 1, // Wygasł po 1 sekundzie
+            server_signature: vec![0u8; 666], // Nieprawidłowy podpis też
+        };
+        
+        // is_valid() powinien zwrócić false
+        assert!(!expired_credential.is_valid(), "Expired credential should not be valid");
+        
+        // check_device powinien odrzucić (najpierw sprawdzi podpis)
+        let result = manager.check_device(&expired_credential);
+        assert!(result.is_err(), "Expired/invalid credential should be rejected");
+    }
+    
+    /// ATAK: Zmiana rozmiaru credential - truncation attack
+    #[test]
+    fn test_attack_credential_truncation() {
+        let manager = VerifiedDeviceManager::new();
+        
+        // Enrollment - zdobądź prawdziwy credential
+        let challenge = manager.start_enrollment();
+        let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
+        let credential = manager.complete_enrollment(&challenge, &solution).unwrap();
+        
+        // Serializuj
+        let bytes = credential.to_bytes();
+        
+        // Atakujący obcina credential
+        let truncated = &bytes[..bytes.len() - 100];
+        
+        // Deserializacja powinna się nie udać
+        let result = DeviceCredential::from_bytes(truncated);
+        assert!(result.is_none(), "Truncated credential should fail to deserialize");
+        
+        // Atakujący wydłuża credential (dopisuje śmieci)
+        let mut extended = bytes.clone();
+        extended.extend_from_slice(&[0xFF; 100]);
+        
+        // Deserializacja MOŻE się nie udać (bo mamy strict format)
+        // LUB jeśli się uda, podpis nadal musi być prawidłowy
+        match DeviceCredential::from_bytes(&extended) {
+            Some(restored) => {
+                // Jeśli deserializacja się udała, sprawdź podpis
+                assert!(restored.verify_signature(&manager.server_key), 
+                    "Restored credential should still have valid signature");
+            }
+            None => {
+                // Deserializacja nie ignoruje trailing data - to też jest OK (strict parsing)
+                // To jest nawet bezpieczniejsze podejście!
+            }
+        }
+    }
+    
+    /// ATAK: Replay enrollment challenge
+    #[test]
+    fn test_attack_enrollment_replay() {
+        let manager = VerifiedDeviceManager::new();
+        
+        // Start enrollment
+        let challenge = manager.start_enrollment();
+        let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
+        
+        // Pierwszy enrollment - OK
+        let credential = manager.complete_enrollment(&challenge, &solution);
+        assert!(credential.is_ok(), "First enrollment should succeed");
+        
+        // Replay tego samego challenge - MUSI być odrzucony
+        let replay = manager.complete_enrollment(&challenge, &solution);
+        assert!(
+            matches!(replay, Err(VerifiedPowError::EnrollmentExpired)),
+            "Replay enrollment should be rejected, got: {:?}", replay
+        );
+    }
+    
+    /// ATAK: Bit flip w podpisie - zmiana jednego bitu
+    #[test]
+    fn test_attack_signature_bit_flip() {
+        let manager = VerifiedDeviceManager::new();
+        
+        // Enrollment - zdobądź prawdziwy credential
+        let challenge = manager.start_enrollment();
+        let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
+        let mut credential = manager.complete_enrollment(&challenge, &solution).unwrap();
+        
+        // Atakujący zmienia jeden bit w podpisie
+        if !credential.server_signature.is_empty() {
+            credential.server_signature[0] ^= 0x01;
+        }
+        
+        // Weryfikacja powinna się nie udać
+        let result = manager.check_device(&credential);
+        assert!(
+            matches!(result, Err(VerifiedPowError::InvalidCredentialSignature)),
+            "Bit-flipped signature should be rejected, got: {:?}", result
+        );
+    }
+    
+    /// ATAK: Zmiana power_class w credential (downgrade attack na difficulty)
+    #[test]
+    fn test_attack_power_class_downgrade() {
+        let manager = VerifiedDeviceManager::new();
+        
+        // Enrollment
+        let challenge = manager.start_enrollment();
+        let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
+        let mut credential = manager.complete_enrollment(&challenge, &solution).unwrap();
+        
+        // Zapisz oryginalny power_class
+        let _original_class = credential.power_class;
+        
+        // Atakujący zmienia power_class na VeryWeak (łatwiejszy PoW)
+        credential.power_class = VerifiedPowerClass::VeryWeak;
+        
+        // To powinno być odrzucone - podpis nie pasuje
+        let result = manager.check_device(&credential);
+        assert!(
+            matches!(result, Err(VerifiedPowError::InvalidCredentialSignature)),
+            "Power class manipulation should be rejected, got: {:?}", result
+        );
+    }
+    
+    /// ATAK: Zmiana device_id w credential (identity theft)
+    #[test]
+    fn test_attack_device_id_theft() {
+        let manager = VerifiedDeviceManager::new();
+        
+        // Enrollment
+        let challenge = manager.start_enrollment();
+        let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
+        let mut credential = manager.complete_enrollment(&challenge, &solution).unwrap();
+        
+        // Zapisz oryginalne device_id
+        let original_id = credential.device_id;
+        
+        // Atakujący zmienia device_id (próbuje podszywać się pod inne urządzenie)
+        credential.device_id = [0xFF; 16];
+        
+        // To powinno być odrzucone - podpis nie pasuje
+        let result = manager.check_device(&credential);
+        assert!(
+            matches!(result, Err(VerifiedPowError::InvalidCredentialSignature)),
+            "Device ID theft should be rejected, got: {:?}", result
+        );
+        
+        // Przywróć oryginalne device_id - powinno działać
+        credential.device_id = original_id;
+        // Ale nadal nie będzie działać bo credential był już zmodyfikowany w pamięci
+        // Musimy pobrać świeży credential
+        let challenge2 = manager.start_enrollment();
+        let solution2 = solve_pow(&challenge2.challenge_data, challenge2.difficulty_bits);
+        let fresh_credential = manager.complete_enrollment(&challenge2, &solution2).unwrap();
+        
+        let result = manager.check_device(&fresh_credential);
+        assert!(result.is_ok(), "Fresh valid credential should work");
+    }
+    
+    /// ATAK: Próba użycia credential przed oficjalnym wydaniem
+    #[test]
+    fn test_attack_premature_credential_use() {
+        let manager = VerifiedDeviceManager::new();
+        
+        // Start enrollment - ale nie kończymy
+        let _challenge = manager.start_enrollment();
+        
+        // Atakujący próbuje ręcznie stworzyć credential z losowymi danymi
+        // (symulacja: atakujący wie jak wygląda credential)
+        let fake_credential = DeviceCredential {
+            device_id: [0xDE; 16], // Losowe device_id
+            power_class: VerifiedPowerClass::Medium,
+            measured_hash_rate: 50000,
+            issued_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            valid_for_secs: 3600,
+            server_signature: vec![0u8; 666], // Losowy podpis
+        };
+        
+        // Musi być odrzucone - podpis nieprawidłowy
+        let result = manager.check_device(&fake_credential);
+        assert!(
+            matches!(result, Err(VerifiedPowError::InvalidCredentialSignature)),
+            "Premature credential should be rejected"
+        );
+    }
+    
+    /// ATAK: Hash rate manipulation - fałszywy benchmark
+    #[test]
+    fn test_attack_fake_hash_rate() {
+        let manager = VerifiedDeviceManager::new();
+        
+        // Enrollment
+        let challenge = manager.start_enrollment();
+        let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
+        let mut credential = manager.complete_enrollment(&challenge, &solution).unwrap();
+        
+        // Atakujący zmienia measured_hash_rate na bardzo wysoką wartość
+        credential.measured_hash_rate = 10_000_000;
+        
+        // To powinno być odrzucone - podpis nie pasuje
+        let result = manager.check_device(&credential);
+        assert!(
+            matches!(result, Err(VerifiedPowError::InvalidCredentialSignature)),
+            "Hash rate manipulation should be rejected, got: {:?}", result
+        );
+    }
+    
+    /// Test poprawności: ServerSigningKey używa Falcon-512 PQC
+    #[test]
+    fn test_server_key_is_pqc() {
+        let key = ServerSigningKey::new();
+        let data = b"test data for signing";
+        let sig = key.sign(data);
+        
+        // Falcon-512 podpis ma 617-690 bajtów (kompresja zależna od wiadomości)
+        // W praktyce może być nawet do ~750 bajtów
+        assert!(sig.len() >= 600 && sig.len() <= 750, 
+            "Signature should be Falcon-512 sized (600-750 bytes), got {} bytes", sig.len());
+        
+        // Weryfikacja powinna działać
+        assert!(key.verify(data, &sig));
+        
+        // Falcon używa randomizacji - podpisy dla tej samej wiadomości są RÓŻNE
+        // To jest zamierzone (dodatkowe bezpieczeństwo)
+        let sig2 = key.sign(data);
+        
+        // Oba podpisy powinny być prawidłowe
+        assert!(key.verify(data, &sig2), "Second signature should also verify");
+        
+        // Ale podpisy są różne (randomizacja)
+        assert_ne!(sig, sig2, "Falcon uses randomized signing - signatures should differ");
     }
 }

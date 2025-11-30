@@ -808,26 +808,30 @@ mod tests {
         let config = RateLimiterConfig {
             ip_tokens_per_sec: 1000.0,
             ip_bucket_capacity: 1000,
-            expensive_op_tokens_per_sec: 10.0,
-            expensive_op_bucket_capacity: 20,
+            expensive_op_tokens_per_sec: 1.0,  // Bardzo wolne refill
+            expensive_op_bucket_capacity: 10,   // Tylko 10 expensive ops
             ..Default::default()
         };
         let limiter = RateLimiter::with_config(config);
         
-        // Expensive ops mają globalny limit 20
-        for i in 0..2 {
+        // Expensive ops mają globalny limit 10
+        // Każda expensive op kosztuje 10 tokenów, więc max 1 na start
+        let mut allowed = 0;
+        let mut rejected = 0;
+        
+        for i in 0..5 {
             let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, i as u8));
-            for _ in 0..10 {
-                let result = limiter.check_anonymous(ip, EndpointCost::Expensive);
-                // Niektóre mogą przejść, ale globalny limit się wyczerpie
-                if result.is_err() {
-                    // OK - global expensive limit hit
-                    return;
-                }
+            let result = limiter.check_anonymous(ip, EndpointCost::Expensive);
+            if result.is_ok() {
+                allowed += 1;
+            } else {
+                rejected += 1;
             }
         }
         
-        // Jeśli tu dotarliśmy, to wszystkie przeszły - co jest OK przy refill
+        // Z 10 tokenów i koszcie 10 na Expensive, tylko 1 powinno przejść
+        assert!(allowed <= 2, "Should allow at most 2 expensive ops, got {}", allowed);
+        assert!(rejected >= 3, "Should reject at least 3 expensive ops, got {} rejected", rejected);
     }
     
     #[test]
