@@ -1977,8 +1977,13 @@ mod tests {
     
     #[test]
     fn test_full_verified_flow() {
-        // Użyj normalnej konfiguracji - timing check jest teraz spójny
-        let manager = VerifiedDeviceManager::new();
+        // Użyj wysokiego suspicion_ratio żeby test był stabilny na wolnym CI
+        // W produkcji normalnie byłoby 5.0, ale na CI maszyny są nieprzewidywalne
+        let config = VerifiedDeviceConfig {
+            suspicion_ratio: 100.0, // Bardzo wysoki - test flow, nie timing
+            ..Default::default()
+        };
+        let manager = VerifiedDeviceManager::with_config(config);
         
         // 1. Enrollment
         let enroll_challenge = manager.start_enrollment();
