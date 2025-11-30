@@ -634,4 +634,319 @@ mod tests {
 
         assert!(result.is_err());
     }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // CIPHERTEXT TAMPERING ATTACKS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_tampered_ciphertext_rejects() {
+        let (addr, secrets) = test_keypair();
+        
+        let mut hint = StealthHintBuilder::new(100).build(&addr).unwrap();
+        
+        // Tamper with ciphertext
+        if !hint.ciphertext.is_empty() {
+            hint.ciphertext[0] ^= 0xFF;
+        }
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::DecryptionFailed(_) => {} // Expected
+            other => panic!("SECURITY: Tampered ciphertext should fail, got {:?}", other),
+        }
+    }
+    
+    #[test]
+    fn test_tampered_nonce_rejects() {
+        let (addr, secrets) = test_keypair();
+        
+        let mut hint = StealthHintBuilder::new(100).build(&addr).unwrap();
+        
+        // Tamper with nonce
+        hint.nonce[0] ^= 0xFF;
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::DecryptionFailed(_) => {} // Expected
+            other => panic!("SECURITY: Tampered nonce should fail, got {:?}", other),
+        }
+    }
+    
+    #[test]
+    fn test_tampered_kem_ct_rejects() {
+        let (addr, secrets) = test_keypair();
+        
+        let mut hint = StealthHintBuilder::new(100).build(&addr).unwrap();
+        
+        // Tamper with KEM ciphertext
+        if !hint.kem_ct.is_empty() {
+            hint.kem_ct[0] ^= 0xFF;
+        }
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::NotForUs | ScanResult::DecryptionFailed(_) => {} // Either is acceptable
+            other => panic!("SECURITY: Tampered kem_ct should fail, got {:?}", other),
+        }
+    }
+    
+    #[test]
+    fn test_tampered_scan_tag_not_for_us() {
+        let (addr, secrets) = test_keypair();
+        
+        let mut hint = StealthHintBuilder::new(100).build(&addr).unwrap();
+        
+        // Tamper with scan tag
+        hint.scan_tag[0] ^= 0xFF;
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::NotForUs => {} // Expected
+            other => panic!("SECURITY: Tampered scan_tag should be NotForUs, got {:?}", other),
+        }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // TRUNCATION ATTACKS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_truncated_ciphertext_rejects() {
+        let (addr, secrets) = test_keypair();
+        
+        let mut hint = StealthHintBuilder::new(100).build(&addr).unwrap();
+        
+        // Truncate ciphertext
+        hint.ciphertext.truncate(hint.ciphertext.len() / 2);
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::DecryptionFailed(_) => {} // Expected
+            other => panic!("SECURITY: Truncated ciphertext should fail, got {:?}", other),
+        }
+    }
+    
+    #[test]
+    fn test_truncated_kem_ct_rejects() {
+        let (addr, secrets) = test_keypair();
+        
+        let mut hint = StealthHintBuilder::new(100).build(&addr).unwrap();
+        
+        // Truncate KEM ciphertext
+        hint.kem_ct.truncate(hint.kem_ct.len() / 2);
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::NotForUs | ScanResult::DecryptionFailed(_) => {} // Either is acceptable
+            other => panic!("SECURITY: Truncated kem_ct should fail, got {:?}", other),
+        }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // SERIALIZATION ATTACKS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_hint_serialization_roundtrip() {
+        let (addr, secrets) = test_keypair();
+        
+        let hint = StealthHintBuilder::new(12345)
+            .memo(b"test memo".to_vec()).unwrap()
+            .build(&addr).unwrap();
+        
+        // Serialize
+        let bytes = hint.to_bytes();
+        
+        // Deserialize
+        let hint2 = StealthHint::from_bytes(&bytes).expect("deserialize failed");
+        
+        // Should still decrypt
+        match decrypt_stealth_hint(&secrets, &hint2) {
+            ScanResult::Match(p) => {
+                assert_eq!(p.value, 12345);
+                assert_eq!(p.memo, b"test memo");
+            }
+            other => panic!("expected Match after serialization, got {:?}", other),
+        }
+    }
+    
+    #[test]
+    fn test_invalid_bytes_rejects() {
+        let result = StealthHint::from_bytes(&[0xFF; 10]);
+        assert!(result.is_err(), "Invalid bytes should fail to deserialize");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PRIVACY TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_hints_unlinkable() {
+        let (addr, _) = test_keypair();
+        
+        // Create multiple hints to same recipient
+        let hints: Vec<_> = (0..5)
+            .map(|i| StealthHintBuilder::new(i * 100).build(&addr).unwrap())
+            .collect();
+        
+        // All scan_tags should be different (unlinkable)
+        for i in 0..hints.len() {
+            for j in (i + 1)..hints.len() {
+                assert_ne!(hints[i].scan_tag, hints[j].scan_tag,
+                    "PRIVACY: Hints to same recipient MUST have different scan_tags");
+            }
+        }
+        
+        // All KEM ciphertexts should be different (fresh encapsulation)
+        for i in 0..hints.len() {
+            for j in (i + 1)..hints.len() {
+                assert_ne!(hints[i].kem_ct, hints[j].kem_ct,
+                    "PRIVACY: Each hint MUST have fresh KEM ciphertext");
+            }
+        }
+    }
+    
+    #[test]
+    fn test_hint_id_uniqueness() {
+        let (addr, secrets) = test_keypair();
+        
+        let hints: Vec<_> = (0..5)
+            .map(|_| StealthHintBuilder::new(100).build(&addr).unwrap())
+            .collect();
+        
+        let mut hint_ids = std::collections::HashSet::new();
+        
+        for hint in &hints {
+            if let ScanResult::Match(payload) = decrypt_stealth_hint(&secrets, hint) {
+                assert!(hint_ids.insert(payload.hint_id), 
+                    "SECURITY: hint_id MUST be unique per hint");
+            }
+        }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // EDGE CASES
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_zero_value() {
+        let (addr, secrets) = test_keypair();
+        
+        let hint = StealthHintBuilder::new(0).build(&addr).unwrap();
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::Match(p) => assert_eq!(p.value, 0),
+            other => panic!("Zero value should work, got {:?}", other),
+        }
+    }
+    
+    #[test]
+    fn test_max_value() {
+        let (addr, secrets) = test_keypair();
+        
+        let hint = StealthHintBuilder::new(u64::MAX).build(&addr).unwrap();
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::Match(p) => assert_eq!(p.value, u64::MAX),
+            other => panic!("Max value should work, got {:?}", other),
+        }
+    }
+    
+    #[test]
+    fn test_empty_memo() {
+        let (addr, secrets) = test_keypair();
+        
+        let hint = StealthHintBuilder::new(100).build(&addr).unwrap();
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::Match(p) => assert!(p.memo.is_empty()),
+            other => panic!("Empty memo should work, got {:?}", other),
+        }
+    }
+    
+    #[test]
+    fn test_max_memo() {
+        let (addr, secrets) = test_keypair();
+        
+        let memo = vec![0x42u8; MAX_MEMO_SIZE];
+        let hint = StealthHintBuilder::new(100)
+            .memo(memo.clone()).unwrap()
+            .build(&addr).unwrap();
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::Match(p) => assert_eq!(p.memo, memo),
+            other => panic!("Max memo should work, got {:?}", other),
+        }
+    }
+    
+    #[test]
+    fn test_custom_r_blind() {
+        let (addr, secrets) = test_keypair();
+        
+        let custom_blind = [0xABu8; 32];
+        let hint = StealthHintBuilder::new(100)
+            .r_blind(custom_blind)
+            .build(&addr).unwrap();
+        
+        match decrypt_stealth_hint(&secrets, &hint) {
+            ScanResult::Match(p) => assert_eq!(p.r_blind, custom_blind),
+            other => panic!("Custom r_blind should work, got {:?}", other),
+        }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // SCAN FUNCTIONS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_hint_might_be_mine() {
+        let (addr, secrets) = test_keypair();
+        let (_, other_secrets) = test_keypair();
+        
+        let hint = StealthHintBuilder::new(100).build(&addr).unwrap();
+        
+        assert!(hint_might_be_mine(&secrets, &hint), 
+            "hint_might_be_mine should return true for correct recipient");
+        assert!(!hint_might_be_mine(&other_secrets, &hint), 
+            "hint_might_be_mine should return false for wrong recipient");
+    }
+    
+    #[test]
+    fn test_scan_hints_batch() {
+        let (addr, secrets) = test_keypair();
+        let (other_addr, _) = test_keypair();
+        
+        let hints = vec![
+            StealthHintBuilder::new(100).build(&addr).unwrap(),
+            StealthHintBuilder::new(200).build(&other_addr).unwrap(),
+            StealthHintBuilder::new(300).build(&addr).unwrap(),
+        ];
+        
+        let found = scan_hints(&secrets, &hints);
+        
+        assert_eq!(found.len(), 2, "Should find 2 hints for us");
+        assert_eq!(found[0].0, 0); // First hint
+        assert_eq!(found[0].1.value, 100);
+        assert_eq!(found[1].0, 2); // Third hint
+        assert_eq!(found[1].1.value, 300);
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // ADDRESS ID TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_addr_id_deterministic() {
+        let (falcon_pk, _) = falcon512::keypair();
+        let (scan_pk, _) = mlkem::keypair();
+        
+        let id1 = compute_addr_id(&falcon_pk, &scan_pk);
+        let id2 = compute_addr_id(&falcon_pk, &scan_pk);
+        
+        assert_eq!(id1, id2, "addr_id MUST be deterministic");
+    }
+    
+    #[test]
+    fn test_different_keys_different_addr_id() {
+        let (addr1, _) = test_keypair();
+        let (addr2, _) = test_keypair();
+        
+        assert_ne!(addr1.id(), addr2.id(), 
+            "Different keypairs MUST produce different addr_id");
+    }
 }

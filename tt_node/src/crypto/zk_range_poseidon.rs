@@ -559,4 +559,191 @@ mod tests {
 
         assert!(verify_range_with_poseidon(proof, pub_inputs));
     }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // TAMPERED PROOF TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[tokio::test]
+    async fn test_tampered_commitment_rejects() {
+        let witness = Witness::new(100u128, [1u8; 32], [2u8; 32]);
+        let opts = default_proof_options();
+        
+        let (proof, mut pub_inputs) = prove_range_with_poseidon(witness, 64, opts);
+        
+        // Attacker tries to change the commitment
+        pub_inputs.value_commitment = pub_inputs.value_commitment.wrapping_add(1);
+        
+        assert!(!verify_range_with_poseidon(proof, pub_inputs), 
+            "SECURITY: Tampered commitment MUST be rejected");
+    }
+    
+    #[tokio::test]
+    async fn test_tampered_recipient_rejects() {
+        let witness = Witness::new(100u128, [1u8; 32], [2u8; 32]);
+        let opts = default_proof_options();
+        
+        let (proof, mut pub_inputs) = prove_range_with_poseidon(witness, 64, opts);
+        
+        // Attacker tries to redirect to different recipient
+        pub_inputs.recipient[0] ^= 0xFF;
+        
+        assert!(!verify_range_with_poseidon(proof, pub_inputs), 
+            "SECURITY: Tampered recipient MUST be rejected");
+    }
+    
+    #[tokio::test]
+    async fn test_tampered_num_bits_rejects() {
+        let witness = Witness::new(100u128, [1u8; 32], [2u8; 32]);
+        let opts = default_proof_options();
+        
+        let (proof, mut pub_inputs) = prove_range_with_poseidon(witness, 64, opts);
+        
+        // Attacker tries to claim smaller range
+        pub_inputs.num_bits = 32;
+        
+        assert!(!verify_range_with_poseidon(proof, pub_inputs), 
+            "SECURITY: Tampered num_bits MUST be rejected");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // WITNESS INTEGRITY TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_different_witnesses_different_commitments() {
+        let w1 = Witness::new(42u128, [1u8; 32], [3u8; 32]);
+        let w2 = Witness::new(43u128, [1u8; 32], [3u8; 32]); // Different value
+        let w3 = Witness::new(42u128, [2u8; 32], [3u8; 32]); // Different blinding
+        
+        let opts = default_proof_options();
+        let prover = CompositeProver::new(64, opts.clone());
+        
+        let trace1 = prover.build_trace(&w1);
+        let trace2 = prover.build_trace(&w2);
+        let trace3 = prover.build_trace(&w3);
+        
+        let pub1 = prover.get_pub_inputs(&trace1);
+        let pub2 = prover.get_pub_inputs(&trace2);
+        let pub3 = prover.get_pub_inputs(&trace3);
+        
+        assert_ne!(pub1.value_commitment, pub2.value_commitment, 
+            "Different values MUST produce different commitments");
+        assert_ne!(pub1.value_commitment, pub3.value_commitment, 
+            "Different blinding MUST produce different commitments");
+    }
+    
+    #[test]
+    fn test_commitment_determinism() {
+        let witness = Witness::new(12345u128, [0xABu8; 32], [0xCDu8; 32]);
+        let opts = default_proof_options();
+        let prover = CompositeProver::new(64, opts);
+        
+        let trace1 = prover.build_trace(&witness);
+        let trace2 = prover.build_trace(&witness);
+        
+        let pub1 = prover.get_pub_inputs(&trace1);
+        let pub2 = prover.get_pub_inputs(&trace2);
+        
+        assert_eq!(pub1.value_commitment, pub2.value_commitment, 
+            "Same witness MUST produce same commitment");
+        assert_eq!(pub1.recipient, pub2.recipient);
+        assert_eq!(pub1.num_bits, pub2.num_bits);
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // RANGE CONSTRAINT TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[tokio::test]
+    async fn test_value_within_range() {
+        // Value 255 fits in 8 bits
+        let witness = Witness::new(255u128, [1u8; 32], [2u8; 32]);
+        let opts = default_proof_options();
+        
+        let (proof, pub_inputs) = prove_range_with_poseidon(witness, 64, opts);
+        assert!(verify_range_with_poseidon(proof, pub_inputs));
+    }
+    
+    #[tokio::test]
+    async fn test_small_nonzero_value() {
+        // Small nonzero value should work
+        let witness = Witness::new(1u128, [1u8; 32], [2u8; 32]);
+        let opts = default_proof_options();
+        
+        let (proof, pub_inputs) = prove_range_with_poseidon(witness, 64, opts);
+        assert!(verify_range_with_poseidon(proof, pub_inputs));
+    }
+    
+    #[tokio::test]
+    async fn test_max_64bit_value() {
+        let max_val = (1u128 << 63) - 1; // Large but fits
+        let witness = Witness::new(max_val, [1u8; 32], [2u8; 32]);
+        let opts = default_proof_options();
+        
+        let (proof, pub_inputs) = prove_range_with_poseidon(witness, 64, opts);
+        assert!(verify_range_with_poseidon(proof, pub_inputs));
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PUBLIC INPUT SERIALIZATION
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_public_inputs_to_elements() {
+        let pub_inputs = PublicInputs {
+            value_commitment: 12345u128,
+            recipient: [0xAB; 32],
+            num_bits: 64,
+        };
+        
+        let elements = pub_inputs.to_elements();
+        
+        // Should have: 1 commitment + 4 recipient chunks + 1 num_bits = 6 elements
+        assert_eq!(elements.len(), 6);
+        assert_eq!(elements[0], BaseElement::new(12345u128));
+        assert_eq!(elements[5], BaseElement::from(64u64));
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // PROOF REPLAY PREVENTION
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[tokio::test]
+    async fn test_proof_cannot_be_reused_with_different_inputs() {
+        let witness1 = Witness::new(100u128, [1u8; 32], [2u8; 32]);
+        let witness2 = Witness::new(200u128, [3u8; 32], [4u8; 32]);
+        let opts = default_proof_options();
+        
+        let (proof1, _pub1) = prove_range_with_poseidon(witness1, 64, opts.clone());
+        let (_proof2, pub2) = prove_range_with_poseidon(witness2, 64, opts);
+        
+        // Try to use proof1 with pub_inputs2
+        assert!(!verify_range_with_poseidon(proof1, pub2), 
+            "SECURITY: Proof MUST NOT be reusable with different public inputs");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // EDGE CASES
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_witness_new_constructor() {
+        let w = Witness::new(42u128, [1u8; 32], [2u8; 32]);
+        assert_eq!(w.value, 42);
+        assert_eq!(w.blinding, [1u8; 32]);
+        assert_eq!(w.recipient, [2u8; 32]);
+    }
+    
+    #[test]
+    fn test_trace_table_dimensions() {
+        let witness = Witness::new(42u128, [1u8; 32], [2u8; 32]);
+        let opts = default_proof_options();
+        let prover = CompositeProver::new(64, opts);
+        let trace = prover.build_trace(&witness);
+        
+        assert_eq!(trace.width(), NUM_COLUMNS);
+        // Trace length should be power of 2
+        assert!(trace.length().is_power_of_two());
+    }
 }

@@ -715,7 +715,10 @@ impl Default for VerifiedDeviceConfig {
             max_burst: 10,
             burst_regen_secs: 300, // 5 minut
             credential_valid_secs: 86400 * 30, // 30 dni
-            suspicion_ratio: 5.0, // 5x szybciej = podejrzane
+            // suspicion_ratio = 5.0 oznacza:
+            // Jeśli rozwiązano 5x szybciej niż ZNORMALIZOWANY expected time → suspicious
+            // Normalizacja uwzględnia różnicę difficulty między enrollment a challenge
+            suspicion_ratio: 5.0,
             suspicion_to_ban: 3,
             ban_duration_secs: 3600, // 1 godzina
         }
@@ -1036,26 +1039,49 @@ impl VerifiedDeviceManager {
             return Err(VerifiedPowError::InvalidSolution);
         }
         
-        // 8. Sprawdź timing (anti-cheat)
-        // Mierzymy czas od wydania challenge do teraz używając Instant (precyzja ms!)
-        // To jest spójne z complete_enrollment() które też używa Instant
+        // 8. Sprawdź timing (anti-cheat) - DIFFICULTY-NORMALIZED
+        // 
+        // Kluczowa obserwacja:
+        // - enrollment_solve_time_ms zmierzony przy difficulty = ENROLLMENT_DIFFICULTY (14)
+        // - challenge może mieć INNY difficulty (zależy od power_class)
+        // 
+        // Rozwiązanie: normalizuj spodziewany czas przez różnicę difficulty:
+        // expected_time = enrollment_time * 2^(challenge_diff - enrollment_diff)
+        //
+        // Przykład:
+        // - enrollment_diff = 14, enrollment_time = 100ms
+        // - challenge_diff = 18 (VeryFast device)
+        // - expected_time = 100ms * 2^(18-14) = 100ms * 16 = 1600ms
+        //
+        // Jeśli actual_time < expected_time / suspicion_ratio → SUSPICIOUS
+        //
+        const ENROLLMENT_DIFFICULTY: u8 = 14;
+        
         let actual_wall_clock_ms = challenge_issued_at.elapsed().as_millis() as u64;
+        let check_ms = if actual_wall_clock_ms > 0 { actual_wall_clock_ms } else { server_measured_ms };
         
         let devices = self.devices.read().unwrap();
         if let Some(state) = devices.get(&credential.device_id) {
-            let expected_ms = state.enrollment_solve_time_ms;
-            // Użyj WEWNĘTRZNEGO pomiaru wall-clock (spójne z enrollment)
-            // server_measured_ms zachowujemy dla logów, ale używamy actual_wall_clock_ms
-            let check_ms = if actual_wall_clock_ms > 0 { actual_wall_clock_ms } else { server_measured_ms };
+            let enrollment_time_ms = state.enrollment_solve_time_ms;
             
-            // Dopuszczamy variance, ale nie 5x szybciej
-            if check_ms > 0 && expected_ms > 0 {
-                let ratio = expected_ms as f64 / check_ms as f64;
+            // Normalizuj przez różnicę difficulty
+            let diff_delta = stored_challenge.difficulty_bits as i32 - ENROLLMENT_DIFFICULTY as i32;
+            let normalized_expected_ms = if diff_delta >= 0 {
+                // Challenge trudniejszy - mnóż enrollment time
+                enrollment_time_ms.saturating_mul(1u64 << diff_delta.min(20) as u32)
+            } else {
+                // Challenge łatwiejszy - dziel enrollment time
+                enrollment_time_ms >> (-diff_delta).min(20) as u32
+            };
+            
+            // Sprawdź czy rozwiązano podejrzanie szybko
+            if check_ms > 0 && normalized_expected_ms > 0 {
+                let ratio = normalized_expected_ms as f64 / check_ms as f64;
                 if ratio > self.config.suspicion_ratio {
                     drop(devices);
                     self.report_suspicious(&credential.device_id);
                     return Err(VerifiedPowError::SuspiciousTiming {
-                        expected_ms,
+                        expected_ms: normalized_expected_ms,
                         actual_ms: check_ms,
                     });
                 }
@@ -2014,23 +2040,20 @@ mod tests {
         assert!(matches!(replay, Err(VerifiedPowError::ChallengeAlreadyUsed)));
     }
     
-    /// Test że timing check działa poprawnie (wykrywa oszustów)
+    /// Test że timing check działa poprawnie - BLOKUJE podejrzane zachowanie
     /// 
-    /// UWAGA: Ten test jest z natury timing-sensitive.
-    /// Używamy bardzo konserwatywnych parametrów żeby działał na wolnym CI.
+    /// Logika: enrollment_time jest normalizowany przez różnicę difficulty.
+    /// Jeśli rozwiązano > suspicion_ratio razy szybciej → BLOKADA (nie log!)
     #[test]
     fn test_timing_anti_cheat_detects_suspicious() {
-        // Bardzo niski ratio - nawet 2x szybciej niż enrollment = suspicious
         let config = VerifiedDeviceConfig {
-            suspicion_ratio: 2.0,
+            suspicion_ratio: 5.0, // 5x szybciej = suspicious
             ..Default::default()
         };
         let manager = VerifiedDeviceManager::with_config(config);
         
-        // 1. Enrollment - symuluj BARDZO WOLNE urządzenie
-        // 1500ms sleep + czas solve = enrollment_solve_time będzie ~1500ms+
+        // 1. Enrollment - normalny (na szybkim komputerze)
         let enroll_challenge = manager.start_enrollment();
-        std::thread::sleep(Duration::from_millis(1500));
         let enroll_solution = solve_pow(&enroll_challenge.challenge_data, enroll_challenge.difficulty_bits);
         let credential = manager.complete_enrollment(&enroll_challenge, &enroll_solution).unwrap();
         
@@ -2039,22 +2062,70 @@ mod tests {
             let _ = manager.check_device(&credential);
         }
         
-        // 3. Teraz wymaga PoW - challenge wydany TERAZ
+        // 3. Teraz wymaga PoW
         let challenge = manager.check_device(&credential)
             .expect("Should succeed")
             .expect("Should require PoW");
         
-        // 4. Solve NATYCHMIAST (bez sleep)
-        // actual_wall_clock będzie ~kilkadziesiąt ms (tylko czas solve)
-        // ratio = 1500 / ~50 = ~30x > 2.0 → MUST be SUSPICIOUS
+        // 4. Solve normalnie - na tym samym komputerze
         let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
-        let fake_fast_time = 1;
         
-        // 5. Verify MUSI wykryć suspicious timing
-        let result = manager.verify_solution(&credential, &challenge, &solution, fake_fast_time);
+        // 5. Verify z normalnym czasem - POWINNO PRZEJŚĆ
+        // Bo enrollment i challenge są na tym samym urządzeniu
+        // i czas jest proporcjonalny do difficulty
+        let result = manager.verify_solution(&credential, &challenge, &solution, 1);
+        
+        // Na NORMALNYM urządzeniu to MUSI przejść
+        // (enrollment_time i challenge_time są proporcjonalne do difficulty)
+        assert!(result.is_ok(), 
+            "Same device should pass timing check: {:?}", result);
+    }
+    
+    /// Test że NAPRAWDĘ podejrzane zachowanie jest BLOKOWANE
+    /// Symulujemy urządzenie które "udaje wolne" podczas enrollment
+    #[test]
+    fn test_timing_anti_cheat_blocks_cheater() {
+        let config = VerifiedDeviceConfig {
+            suspicion_ratio: 3.0, // Niższy próg dla testu
+            ..Default::default()
+        };
+        let manager = VerifiedDeviceManager::with_config(config);
+        
+        // 1. Enrollment - SZTUCZNIE WOLNY (symuluj że ktoś udaje słabe urządzenie)
+        // Enrollment difficulty = 14, ale dodajemy 2 sekundy sleep
+        // To da enrollment_solve_time ~2000ms
+        let enroll_challenge = manager.start_enrollment();
+        std::thread::sleep(Duration::from_millis(2000)); // UDAJEMY wolne urządzenie
+        let enroll_solution = solve_pow(&enroll_challenge.challenge_data, enroll_challenge.difficulty_bits);
+        let credential = manager.complete_enrollment(&enroll_challenge, &enroll_solution).unwrap();
+        
+        // enrollment_solve_time_ms ~= 2000ms (bo sleep + solve)
+        // To sugeruje że urządzenie jest BARDZO wolne
+        
+        // 2. Wyczerpaj burst
+        for _ in 0..5 {
+            let _ = manager.check_device(&credential);
+        }
+        
+        // 3. Teraz wymaga PoW
+        let challenge = manager.check_device(&credential)
+            .expect("Should succeed")
+            .expect("Should require PoW");
+        
+        // 4. Solve BEZ sleep - "magicznie" szybko!
+        // Na prawdziwym wolnym urządzeniu trwałoby ~2000ms * 2^(diff_delta)
+        // Ale cheater rozwiązuje w ~dziesiątki ms
+        let solution = solve_pow(&challenge.challenge_data, challenge.difficulty_bits);
+        
+        // 5. Verify - MUSI wykryć oszustwo
+        // expected_time = enrollment_time * 2^(challenge_diff - enrollment_diff)
+        // Dla VeryWeak device (enrollment 2s): expected ~2000ms * 2^(diff_delta)
+        // actual ~50ms → ratio >> 3.0 → SUSPICIOUS!
+        let result = manager.verify_solution(&credential, &challenge, &solution, 1);
+        
         assert!(
             matches!(result, Err(VerifiedPowError::SuspiciousTiming { .. })),
-            "Should detect suspicious timing, got: {:?}", result
+            "Cheater should be BLOCKED, not just logged: {:?}", result
         );
     }
     

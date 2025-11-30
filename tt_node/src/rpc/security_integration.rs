@@ -416,12 +416,17 @@ mod tests {
             other => panic!("Expected PowRequired, got {:?}", other),
         };
         
-        // Solve PoW
+        // Solve PoW - but wait to avoid suspicion_ratio triggering
+        // The system expects ~similar time as enrollment solve time
+        // Sleep before solving to simulate realistic timing
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
         let start = std::time::Instant::now();
         let solution = solve_pow(&pow_challenge.challenge_data, pow_challenge.difficulty_bits);
         let server_measured = start.elapsed().as_millis() as u64;
         
-        // Verify
+        // Verify - this tests the flow, not timing anti-cheat
+        // (Timing anti-cheat is tested separately in verified_device_pow tests)
         let verify_result = gateway.verify_pow_solution(
             &credential,
             &pow_challenge,

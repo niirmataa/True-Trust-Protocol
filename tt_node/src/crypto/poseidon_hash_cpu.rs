@@ -148,4 +148,131 @@ mod tests {
         let h3 = poseidon_hash_cpu(value + 1u128, &blinding, &recipient);
         assert_ne!(h1, h3);
     }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // AVALANCHE EFFECT TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_avalanche_value_change() {
+        let blinding = [0u8; 32];
+        let recipient = [0u8; 32];
+        
+        let h1 = poseidon_hash_cpu(0u128, &blinding, &recipient);
+        let h2 = poseidon_hash_cpu(1u128, &blinding, &recipient);
+        
+        // Outputs should be completely different
+        assert_ne!(h1, h2, "1-bit value change MUST produce different hash");
+    }
+    
+    #[test]
+    fn test_avalanche_blinding_change() {
+        let value = 42u128;
+        let recipient = [0u8; 32];
+        
+        let blinding1 = [0u8; 32];
+        let mut blinding2 = [0u8; 32];
+        blinding2[0] = 1; // 1 bit change
+        
+        let h1 = poseidon_hash_cpu(value, &blinding1, &recipient);
+        let h2 = poseidon_hash_cpu(value, &blinding2, &recipient);
+        
+        assert_ne!(h1, h2, "1-bit blinding change MUST produce different hash");
+    }
+    
+    #[test]
+    fn test_avalanche_recipient_change() {
+        let value = 42u128;
+        let blinding = [0u8; 32];
+        
+        let recipient1 = [0u8; 32];
+        let mut recipient2 = [0u8; 32];
+        recipient2[0] = 1; // 1 bit change
+        
+        let h1 = poseidon_hash_cpu(value, &blinding, &recipient1);
+        let h2 = poseidon_hash_cpu(value, &blinding, &recipient2);
+        
+        assert_ne!(h1, h2, "1-bit recipient change MUST produce different hash");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // EDGE CASES
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_zero_inputs() {
+        let h = poseidon_hash_cpu(0u128, &[0u8; 32], &[0u8; 32]);
+        // Should still produce non-trivial output
+        assert_ne!(h, BaseElement::ZERO, "All-zero inputs should not produce zero hash");
+    }
+    
+    #[test]
+    fn test_max_value() {
+        let max_u64 = u64::MAX as u128;
+        let h1 = poseidon_hash_cpu(max_u64, &[0u8; 32], &[0u8; 32]);
+        let h2 = poseidon_hash_cpu(max_u64 - 1, &[0u8; 32], &[0u8; 32]);
+        
+        assert_ne!(h1, h2, "Different values MUST produce different hashes");
+    }
+    
+    #[test]
+    fn test_large_value() {
+        // Test with value > u64::MAX
+        let large = (u64::MAX as u128) + 1;
+        let h = poseidon_hash_cpu(large, &[0u8; 32], &[0u8; 32]);
+        assert_ne!(h, BaseElement::ZERO);
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // BINDING TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_commitment_binding() {
+        // Same (value, blinding, recipient) should ALWAYS produce same commitment
+        let value = 12345u128;
+        let blinding = [0xABu8; 32];
+        let recipient = [0xCDu8; 32];
+        
+        let h1 = poseidon_hash_cpu(value, &blinding, &recipient);
+        let h2 = poseidon_hash_cpu(value, &blinding, &recipient);
+        let h3 = poseidon_hash_cpu(value, &blinding, &recipient);
+        
+        assert_eq!(h1, h2);
+        assert_eq!(h2, h3);
+    }
+    
+    #[test]
+    fn test_commitment_hiding() {
+        // Different blinding with same value should produce different commitment
+        let value = 100u128;
+        let recipient = [0u8; 32];
+        
+        let h1 = poseidon_hash_cpu(value, &[1u8; 32], &recipient);
+        let h2 = poseidon_hash_cpu(value, &[2u8; 32], &recipient);
+        
+        assert_ne!(h1, h2, "Different blinding MUST hide same value");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // STATE TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_poseidon_state_reset() {
+        let mut state = PoseidonState::new();
+        
+        // First permutation
+        state.absorb(&[BaseElement::new(42), BaseElement::new(1), BaseElement::new(2)]);
+        state.permute();
+        let h1 = state.squeeze();
+        
+        // New state should produce same result
+        let mut state2 = PoseidonState::new();
+        state2.absorb(&[BaseElement::new(42), BaseElement::new(1), BaseElement::new(2)]);
+        state2.permute();
+        let h2 = state2.squeeze();
+        
+        assert_eq!(h1, h2);
+    }
 }

@@ -432,4 +432,301 @@ mod tests {
             other => panic!("Expected Match, got {:?}", other),
         }
     }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // STARK PROOF TAMPERING ATTACKS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_tampered_stark_proof_rejects() {
+        let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let mut output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        // Tamper with STARK proof - flip a byte in the middle to avoid header corruption
+        if output.stark_proof.len() > 100 {
+            output.stark_proof[100] ^= 0xFF;
+        }
+        
+        assert!(!output.verify(), 
+            "SECURITY: Tampered STARK proof MUST be rejected");
+    }
+    
+    #[test]
+    fn test_truncated_stark_proof_rejects() {
+        let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let mut output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        // Truncate STARK proof
+        output.stark_proof.truncate(output.stark_proof.len() / 2);
+        
+        assert!(!output.verify(), 
+            "SECURITY: Truncated STARK proof MUST be rejected");
+    }
+    
+    #[test]
+    fn test_empty_stark_proof_rejects() {
+        let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let mut output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        // Empty STARK proof
+        output.stark_proof.clear();
+        
+        assert!(!output.verify(), 
+            "SECURITY: Empty STARK proof MUST be rejected");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // COMMITMENT TAMPERING ATTACKS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_tampered_commitment_rejects() {
+        let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let mut output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        // Tamper with Poseidon commitment
+        output.poseidon_commitment = output.poseidon_commitment.wrapping_add(1);
+        
+        assert!(!output.verify(), 
+            "SECURITY: Tampered commitment MUST break STARK verification");
+    }
+    
+    #[test]
+    fn test_tampered_recipient_rejects() {
+        let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let mut output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        // Tamper with recipient
+        output.recipient[0] ^= 0xFF;
+        
+        assert!(!output.verify(), 
+            "SECURITY: Tampered recipient MUST break STARK verification");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // ENCRYPTED VALUE ATTACKS
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_tampered_encrypted_value_rejects() {
+        let (kyber_pk, kyber_sk) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let mut output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        // Tamper with encrypted value
+        if output.encrypted_value.len() > 50 {
+            output.encrypted_value[50] ^= 0xFF;
+        }
+        
+        assert!(output.decrypt_value(&kyber_sk).is_none(), 
+            "SECURITY: Tampered encrypted value MUST fail decryption");
+    }
+    
+    #[test]
+    fn test_truncated_encrypted_value_rejects() {
+        let (kyber_pk, kyber_sk) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let mut output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        // Truncate encrypted value
+        output.encrypted_value.truncate(100);
+        
+        assert!(output.decrypt_value(&kyber_sk).is_none(), 
+            "SECURITY: Truncated encrypted value MUST fail decryption");
+    }
+    
+    #[test]
+    fn test_wrong_key_fails_decryption() {
+        let (kyber_pk1, _) = crate::kyber_kem::kyber_keypair();
+        let (_, kyber_sk2) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk1);
+        
+        // Try to decrypt with wrong key
+        assert!(output.decrypt_value(&kyber_sk2).is_none(), 
+            "SECURITY: Wrong key MUST fail decryption");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // DECRYPT AND VERIFY INTEGRITY
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_decrypt_and_verify_checks_commitment() {
+        let (kyber_pk, kyber_sk) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let mut output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        // Tamper with commitment (but keep encrypted_value valid)
+        output.poseidon_commitment = output.poseidon_commitment.wrapping_add(1);
+        
+        // decrypt_value might work, but decrypt_and_verify must fail
+        assert!(output.decrypt_and_verify(&kyber_sk).is_none(), 
+            "SECURITY: decrypt_and_verify MUST check commitment");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // TRANSACTION INTEGRITY
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_tx_id_determinism() {
+        let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        let tx = TransactionStark {
+            inputs: vec![],
+            outputs: vec![output],
+            fee: 10,
+            nonce: 1,
+            timestamp: 1_234_567_890,
+        };
+        
+        let id1 = tx.id();
+        let id2 = tx.id();
+        
+        assert_eq!(id1, id2, "TxID MUST be deterministic");
+    }
+    
+    #[test]
+    fn test_tx_id_changes_with_output() {
+        let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let output1 = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        let output2 = TxOutputStark::new(200_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        let tx1 = TransactionStark {
+            inputs: vec![],
+            outputs: vec![output1],
+            fee: 10,
+            nonce: 1,
+            timestamp: 1_234_567_890,
+        };
+        
+        let tx2 = TransactionStark {
+            inputs: vec![],
+            outputs: vec![output2],
+            fee: 10,
+            nonce: 1,
+            timestamp: 1_234_567_890,
+        };
+        
+        assert_ne!(tx1.id(), tx2.id(), "Different outputs MUST produce different TxID");
+    }
+    
+    #[test]
+    fn test_tx_serialization_roundtrip() {
+        let (kyber_pk, _) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        let output = TxOutputStark::new(100_000, &blinding, [1u8; 32], &kyber_pk);
+        
+        let tx = TransactionStark {
+            inputs: vec![],
+            outputs: vec![output],
+            fee: 10,
+            nonce: 1,
+            timestamp: 1_234_567_890,
+        };
+        
+        let bytes = tx.to_bytes();
+        let tx2 = TransactionStark::from_bytes(&bytes).expect("deserialize failed");
+        
+        assert_eq!(tx.id(), tx2.id(), "Serialization must preserve TxID");
+        assert_eq!(tx.fee, tx2.fee);
+        assert_eq!(tx.nonce, tx2.nonce);
+        assert_eq!(tx.timestamp, tx2.timestamp);
+    }
+    
+    #[test]
+    fn test_invalid_bytes_rejects() {
+        let result = TransactionStark::from_bytes(&[0xFF; 10]);
+        assert!(result.is_err(), "Invalid bytes should fail deserialization");
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // EDGE CASES
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_small_nonzero_value() {
+        let (kyber_pk, kyber_sk) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        // Small nonzero value should work
+        let output = TxOutputStark::new(1, &blinding, [1u8; 32], &kyber_pk);
+        
+        assert!(output.verify(), "Small nonzero value should verify");
+        let val = output.decrypt_and_verify(&kyber_sk).expect("decrypt failed");
+        assert_eq!(val, 1);
+    }
+    
+    #[test]
+    fn test_max_u64_value() {
+        let (kyber_pk, kyber_sk) = crate::kyber_kem::kyber_keypair();
+        let mut blinding = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut blinding);
+
+        // Note: Using a large but safe value
+        let large_value = (1u64 << 62) - 1;
+        let output = TxOutputStark::new(large_value, &blinding, [1u8; 32], &kyber_pk);
+        
+        assert!(output.verify(), "Large value should verify");
+        let val = output.decrypt_and_verify(&kyber_sk).expect("decrypt failed");
+        assert_eq!(val, large_value);
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEALTH DATA CONVERSION
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    #[test]
+    fn test_stealth_data_roundtrip() {
+        use crate::stealth_pq::{StealthHint};
+        
+        let hint = StealthHint {
+            scan_tag: [0xABu8; 8],
+            kem_ct: vec![0xCDu8; 1088],
+            nonce: [0xEFu8; 12],
+            ciphertext: vec![0x12u8; 512],
+        };
+        
+        let data = TxStealthData::from_hint(&hint);
+        let hint2 = data.to_hint();
+        
+        assert_eq!(hint.scan_tag, hint2.scan_tag);
+        assert_eq!(hint.kem_ct, hint2.kem_ct);
+        assert_eq!(hint.nonce, hint2.nonce);
+        assert_eq!(hint.ciphertext, hint2.ciphertext);
+    }
 }
